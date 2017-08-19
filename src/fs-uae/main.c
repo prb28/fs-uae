@@ -33,6 +33,7 @@
 #include "plugins.h"
 #include "options.h"
 #include "paths.h"
+#include "remote_debug.h"
 #include "config-drives.h"
 #ifdef WITH_CEF
 #include <fs/emu/cef.h>
@@ -1294,6 +1295,18 @@ int main(int argc, char *argv[])
     amiga_init_lua(fs_emu_acquire_lua, fs_emu_release_lua);
     amiga_init_lua_state(fs_emu_get_lua_state());
     fs_uae_init_lua_state(fs_emu_get_lua_state());
+#endif
+
+#ifdef REMOTE_DEBUGGER
+	int remote_debugger = fs_config_get_int("remote_debugger");
+
+	if (remote_debugger != FS_CONFIG_NONE) {
+		// -1 as 0 means no time-out but the user will send in 1 to enable the remote debugger to
+		// make sure this config setting works similar to other settings. Values > 1 will result
+		// in the code waiting for x number of seconds for the remote debugger to connect.
+		// If the value ends up being negative no setup will be done.
+		remote_debug_init(remote_debugger - 1);
+	}
 #endif
 
     if (fs_emu_get_video_format() == FS_EMU_VIDEO_FORMAT_RGBA) {

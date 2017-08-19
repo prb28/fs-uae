@@ -60,6 +60,7 @@
 #include "ethernet.h"
 #include "uae/debuginfo.h"
 #include "uae/segtracker.h"
+#include "remote_debug.h"
 #ifdef RETROPLATFORM
 #include "rp.h"
 #endif
@@ -124,6 +125,9 @@ void devices_vsync_pre(void)
 	statusline_vsync();
 #ifdef WITH_X86
 	x86_bridge_vsync();
+#endif
+#ifdef REMOTE_DEBUGGER
+	remote_debug_update ();
 #endif
 }
 

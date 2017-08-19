@@ -47,6 +47,12 @@ uaecptr find_trap (const TCHAR *name);
 extern uae_u32 CallLib (TrapContext *context, uaecptr library_base, uae_s16 func_offset);
 extern uae_u32 CallFunc (TrapContext *context, uaecptr func);
 
+/* 
+ * RemoteDebug: Temporary for now
+ */
+extern void context_set_areg(TrapContext *context, int r, uae_u32 v);
+extern void context_set_dreg(TrapContext *context, int r, uae_u32 v);
+
 /*
  * Initialization
  */

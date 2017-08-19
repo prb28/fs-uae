@@ -484,6 +484,21 @@ uae_u32 CallFunc (TrapContext *context, uaecptr func)
 	return trap_Call68k (context, func);
 }
 
+/* 
+ * Temporary
+ */
+void context_set_areg(TrapContext *context, int r, uae_u32 v)
+{
+	context->saved_regs.regs[8 + r] = v;
+}
+
+/*
+ * Temporary
+ */
+void context_set_dreg(TrapContext *context, int r, uae_u32 v)
+{
+	context->saved_regs.regs[r] = v;
+}
 
 /*
 * Initialize trap mechanism.

@@ -67,6 +67,7 @@
 #include "cpuboard.h"
 #include "rommgr.h"
 #include "debug.h"
+#include "remote_debug.h"
 #ifdef RETROPLATFORM
 #include "rp.h"
 #endif
@@ -1811,12 +1812,18 @@ static uae_u32 REGPARAM2 debugger_helper(TrapContext *context)
 	switch (mode)
 	{
 		case 1:
+#ifdef REMOTE_DEBUGGER
+		remote_debug_start_executable(context);
+#endif
 		// Execute debugger_boot() to get here.
 		write_log(_T("debugger #1\n"));
 		// return RunCommand(() parameters
 		// does nothing if D1 == 0.
 		break;
 		case 2:
+#ifdef REMOTE_DEBUGGER
+		remote_debug_end_executable(context);
+#endif
 		// called when RunCommand() returns
 		// D0 = RunCommand() return code.
 		write_log(_T("debugger #2\n"));
@@ -1828,7 +1835,7 @@ static uae_u32 REGPARAM2 debugger_helper(TrapContext *context)
 	return 1;
 }
 
-static void debugger_boot(void)
+void debugger_boot(void)
 {
 	Unit *u;
 	for (u = units; u; u = u->next) {

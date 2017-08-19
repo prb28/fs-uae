@@ -3570,7 +3570,7 @@ static void show_exec_tasks (void)
 	}
 }
 
-static uaecptr get_base (const uae_char *name, int offset)
+uaecptr get_base (const uae_char *name, int offset)
 {
 	uaecptr v = get_long_debug (4);
 	addrbank *b = &get_mem_bank(v);

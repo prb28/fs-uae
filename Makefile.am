@@ -308,6 +308,9 @@ libuae_a_SOURCES = \
 	src/fpp.cpp \
 	src/fsdb.cpp \
 	src/fsusage.cpp \
+	src/remote_debug/remote_debug_conn.cpp \
+	src/remote_debug/remote_debug.cpp \
+	src/debuginfo.cpp \
 	src/gayle.cpp \
 	src/gfxboard.cpp \
 	src/gfxutil.cpp \
