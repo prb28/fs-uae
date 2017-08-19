@@ -1834,13 +1834,15 @@ static uae_u32 REGPARAM2 debugger_helper(TrapContext *context)
 	}
 	return 1;
 }
-
 void debugger_boot(void)
 {
 	Unit *u;
+	printf("starting debugger boot units: %p\n", units);
 	for (u = units; u; u = u->next) {
 		if (is_virtual(u->unit) && filesys_isvolume(u)) {
+		    printf("looping devs %p\n", u);
 			put_byte(u->volume + 173 - 32, get_byte(u->volume + 173 - 32) | 2);
+			printf("signal!\n");
 			uae_Signal(get_long(u->volume + 176 - 32), 1 << 13);
 			break;
 		}
@@ -8574,7 +8576,7 @@ void filesys_install (void)
 	dw (RTS);
 
 	org(rtarea_base + 0xFF3C);
-	calltrap(deftrap2(debugger_helper, 0, _T("debugger_helper")));
+	calltrap(deftrap2(debugger_helper, TRAPFLAG_EXTRA_STACK, _T("debugger_helper")));
 	dw(RTS);
 
 	org (rtarea_base + 0xFF40);
