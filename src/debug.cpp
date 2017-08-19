@@ -21,6 +21,7 @@
 #include "newcpu.h"
 #include "cpu_prefetch.h"
 #include "debug.h"
+#include "remote_debug.h"
 #include "cia.h"
 #include "xwin.h"
 #include "identify.h"
@@ -5292,6 +5293,13 @@ void debug (void)
 {
 	int i;
 	int wasactive;
+
+#ifdef REMOTE_DEBUGGER
+	if (remote_debugging) {
+		remote_debug ();
+		return;
+	}
+#endif
 
 	if (savestate_state)
 		return;
