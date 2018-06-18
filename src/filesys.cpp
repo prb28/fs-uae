@@ -21,7 +21,7 @@
 * Will probably fail spectacularly in some cases if the filesystem is
 * modified at the same time by another process while UAE is running.
 */
-
+ 
 #include "sysconfig.h"
 #include "sysdeps.h"
 
@@ -1834,19 +1834,23 @@ static uae_u32 REGPARAM2 debugger_helper(TrapContext *context)
 	}
 	return 1;
 }
-void debugger_boot(void)
+bool debugger_boot(void)
 {
 	Unit *u;
 	printf("starting debugger boot units: %p\n", units);
-	for (u = units; u; u = u->next) {
-		if (is_virtual(u->unit) && filesys_isvolume(u)) {
-		    printf("looping devs %p\n", u);
-			put_byte(u->volume + 173 - 32, get_byte(u->volume + 173 - 32) | 2);
-			printf("signal!\n");
-			uae_Signal(get_long(u->volume + 176 - 32), 1 << 13);
-			break;
+	if (units) {
+		for (u = units; u; u = u->next) {
+			if (is_virtual(u->unit) && filesys_isvolume(u)) {
+				printf("looping devs %p\n", u);
+				put_byte(u->volume + 173 - 32, get_byte(u->volume + 173 - 32) | 2);
+				printf("signal!\n");
+				uae_Signal(get_long(u->volume + 176 - 32), 1 << 13);
+				break;
+			}
 		}
+		return true;
 	}
+	return false;
 }
 
 int filesys_insert (int nr, const TCHAR *volume, const TCHAR *rootdir, bool readonly, int flags)
