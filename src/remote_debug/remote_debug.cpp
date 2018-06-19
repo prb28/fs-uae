@@ -388,7 +388,12 @@ static bool send_registers (void)
 	    buffer = write_reg_32 (buffer, m68k_areg (regs, i));
 
     buffer = write_reg_32 (buffer, regs.sr);
-    buffer = write_reg_32 (buffer, m68k_getpc ());
+	uaecptr pc = m68k_getpc ();
+    buffer = write_reg_32 (buffer, pc);
+
+	uaecptr nextpc = 0;
+	m68k_disasm (pc, &nextpc, 1);
+    buffer = write_reg_32 (buffer, nextpc);
 
     debug_log("current pc %08x\n", m68k_getpc ());
 
