@@ -502,6 +502,39 @@ bool set_memory (char* packet, int packet_length)
     return reply_ok ();
 }
 
+bool set_register (char* packet, int packet_length)
+{
+    char name[256];
+	char regType;
+	int registerNumber;
+	uaecptr value;
+
+	if (sscanf (packet, "%c%d=%x#", &regType, &registerNumber, &value) != 3) {
+		debug_log("failed to parse set_register packet: %s\n", packet);
+		send_packet_string ("E01");
+		return false;
+    }
+
+	if ((registerNumber < 0) || (registerNumber > 7)) {
+		debug_log("The register name '%s' is invalid\n", name);
+		send_packet_string ("E01");
+		return false;
+	}
+
+	if (regType == 'd') {
+		m68k_dreg (regs, registerNumber) = value;
+	} else if (regType == 'a') {
+		m68k_areg (regs, registerNumber) = value;
+	} else {
+		debug_log("The register name '%s' is invalid\n", name);
+		send_packet_string ("E01");
+		return false;
+	}
+
+    return reply_ok ();
+}
+
+
 static uae_u32 get_u32 (const uae_u8** data)
 {
     const uae_u8* temp = *data;
@@ -1001,6 +1034,7 @@ static bool handle_packet(char* packet, int length)
 		case 'k' : return kill_program ();
 		case 'm' : return send_memory (packet + 1);
 		case 'M' : return set_memory (packet + 1, length - 1);
+		case 'P' : return set_register (packet + 1, length - 1);
 		case 'c' : return continue_exec (packet + 1);
 		case 'Z' : return set_breakpoint (packet + 1, 1);
 		case 'z' : return set_breakpoint (packet + 1, 0);
