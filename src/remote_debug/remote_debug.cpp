@@ -690,6 +690,8 @@ static bool step_next_instruction () {
 	uaecptr pc = m68k_getpc ();
 	m68k_disasm (pc, &nextpc, 1);
 
+    activate_debugger ();
+
 	step_cpu = true;
 	did_step_cpu = true;
 	exception_debugging = 1;
