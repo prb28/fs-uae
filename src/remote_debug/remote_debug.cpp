@@ -66,7 +66,7 @@ static rconn* s_conn = 0;
 //extern int debug_illegal;
 //extern uae_u64 debug_illegal_mask;
 
-extern void debugger_boot();
+extern bool debugger_boot();
 
 extern int debug_dma;
 static char s_exe_to_run[4096];
@@ -112,6 +112,10 @@ static int s_lastSize = 0;
 static unsigned int s_socket_update_count = 0;
 
 bool need_ack = true;
+static bool vRunCalled = false;
+
+// Declaration of the update_connection function
+static void update_connection(void);
 
 extern "C" {
     int remote_debugging = 0;
@@ -156,29 +160,29 @@ static void debug_log(const char *format, ...)
 
 static void remote_debug_init_ (int time_out)
 {
-    if (s_conn || time_out < 0)
-	    return;
+	if (s_conn || time_out < 0)
+		return;
 
-    debug_log("creating connection...\n");
+	debug_log("creating connection...\n");
 
-    if (!(s_conn = rconn_create (ConnectionType_Listener, 6860)))
-	    return;
+	if (!(s_conn = rconn_create (ConnectionType_Listener, 6860)))
+		return;
 
-    debug_log("remote debugger active\n");
+	debug_log("remote debugger active\n");
 
-    remote_debugging = 1;
+	remote_debugging = 1;
 
-    // if time_out > 0 we wait that number of seconds for a connection to be made. If
-    // none has been done within the given time-frame we just continue
+	// if time_out > 0 we wait that number of seconds for a connection to be made. If
+	// none has been done within the given time-frame we just continue
 
-    for (int i = 0; i < time_out * 10; i++) {
-		rconn_update_listner (s_conn);
+	for (int i = 0; i < time_out * 10; i++)	{
+		update_connection();
 
-		if (rconn_is_connected (s_conn))
+		if (vRunCalled)
 			return;
 
-		sleep_millis (100);	// sleep for 100 ms to not hammer on the socket while waiting
-    }
+		sleep_millis (100); // sleep for 100 ms to not hammer on the socket while waiting
+	}
 }
 
 struct Breakpoint {
@@ -498,6 +502,39 @@ bool set_memory (char* packet, int packet_length)
     return reply_ok ();
 }
 
+bool set_register (char* packet, int packet_length)
+{
+    char name[256];
+	char regType;
+	int registerNumber;
+	uaecptr value;
+
+	if (sscanf (packet, "%c%d=%x#", &regType, &registerNumber, &value) != 3) {
+		debug_log("failed to parse set_register packet: %s\n", packet);
+		send_packet_string ("E01");
+		return false;
+    }
+
+	if ((registerNumber < 0) || (registerNumber > 7)) {
+		debug_log("The register name '%s' is invalid\n", name);
+		send_packet_string ("E01");
+		return false;
+	}
+
+	if (regType == 'd') {
+		m68k_dreg (regs, registerNumber) = value;
+	} else if (regType == 'a') {
+		m68k_areg (regs, registerNumber) = value;
+	} else {
+		debug_log("The register name '%s' is invalid\n", name);
+		send_packet_string ("E01");
+		return false;
+	}
+
+    return reply_ok ();
+}
+
+
 static uae_u32 get_u32 (const uae_u8** data)
 {
     const uae_u8* temp = *data;
@@ -608,12 +645,20 @@ static int map_68k_exception(int exception) {
 
 
 static bool send_exception (void) {
+	// this function will just exit if already connected
+	rconn_update_listner(s_conn);
 
 	unsigned char buffer[16] = { 0 };
-
-	debug_log("send exception %d\n", regs.exception);
-
-	int sig = map_68k_exception (regs.exception);
+	int sig = 0;
+	if (regs.spcflags & SPCFLAG_BRK) {
+		// It's a breakpoint
+		debug_log("send spcflags %d\n", regs.spcflags);
+		sig = 5;
+	} else {
+		// It's a cpu exception
+		debug_log("send exception %d\n", regs.exception);
+		sig = map_68k_exception(regs.exception);
+	}
 
 	buffer[0] = '$';
 	buffer[1] = 'S';
@@ -644,6 +689,8 @@ static bool step_next_instruction () {
 	uaecptr nextpc = 0;
 	uaecptr pc = m68k_getpc ();
 	m68k_disasm (pc, &nextpc, 1);
+
+    activate_debugger ();
 
 	step_cpu = true;
 	did_step_cpu = true;
@@ -694,9 +741,8 @@ static bool handle_vrun (char* packet)
 
 	debug_log("running debugger_boot\n");
 
-	debugger_boot ();
-
 	// TODO: Extract args
+	vRunCalled = true;
 
 	return true;
 }
@@ -990,6 +1036,7 @@ static bool handle_packet(char* packet, int length)
 		case 'k' : return kill_program ();
 		case 'm' : return send_memory (packet + 1);
 		case 'M' : return set_memory (packet + 1, length - 1);
+		case 'P' : return set_register (packet + 1, length - 1);
 		case 'c' : return continue_exec (packet + 1);
 		case 'Z' : return set_breakpoint (packet + 1, 1);
 		case 'z' : return set_breakpoint (packet + 1, 0);
@@ -1212,6 +1259,9 @@ static void remote_debug_update_ (void)
 	if (rconn_poll_read(s_conn)) {
 		activate_debugger ();
 	}
+	if (vRunCalled) {
+		vRunCalled = !debugger_boot();
+	}
 }
 
 extern uaecptr get_base (const uae_char *name, int offset);
@@ -1282,6 +1332,8 @@ void remote_debug_start_executable (struct TrapContext *context)
 	uae_u32 ptr = seglist_addr;
 	while(ptr != 0) {
 		char temp[64];
+		unsigned char addrStrTemp[9] = { 0 };
+		unsigned char sizeStrTemp[9] = { 0 };
 
 		uae_u32 size = get_long(ptr - 4) - 8; // size of BPTR + segment
 		uae_u32 addr = ptr + 4;
@@ -1289,7 +1341,9 @@ void remote_debug_start_executable (struct TrapContext *context)
 		s_segment_info[s_segment_count].address = addr;
 		s_segment_info[s_segment_count].size = size;
 
-		sprintf(temp, ";%d;%d", addr, size);
+		write_reg_32(addrStrTemp, addr);
+		write_reg_32(sizeStrTemp, size);
+		sprintf(temp, ";%s;%s", addrStrTemp, sizeStrTemp);
 		strcat(buffer, temp);
 
 		s_segment_count++;
@@ -1328,6 +1382,9 @@ void remote_debug_start_executable (struct TrapContext *context)
 void remote_debug_end_executable (struct TrapContext *context)
 {
 	debug_log("remote_debug_end_executable\n");
+	char buffer[1024] = {0};
+	strcpy(buffer, "W00");
+	send_packet_string(buffer);
 }
 
 //
@@ -1337,9 +1394,9 @@ void remote_debug_end_executable (struct TrapContext *context)
 extern "C"
 {
 
-void remote_debug_init (int time_out) { remote_debug_init_ (time_out); }
-void remote_debug (void) { remote_debug_ (); }
-void remote_debug_update (void) { remote_debug_update_ (); }
+	void remote_debug_init(int time_out) { return remote_debug_init_(time_out); }
+	void remote_debug(void) { remote_debug_(); }
+	void remote_debug_update(void) { remote_debug_update_(); }
 
 }
 
