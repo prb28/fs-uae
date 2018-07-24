@@ -1332,12 +1332,8 @@ void remote_debug_start_executable (struct TrapContext *context)
 	uae_u32 ptr = seglist_addr;
 	while(ptr != 0) {
 		char temp[64];
-		unsigned char addrStrTemp[9];
-		unsigned char sizeStrTemp[9];
-		for (int i = 0; i < 9; i++) {
-			addrStrTemp[i] = 0;
-			sizeStrTemp[i] = 0;
-		}
+		unsigned char addrStrTemp[9] = { 0 };
+		unsigned char sizeStrTemp[9] = { 0 };
 
 		uae_u32 size = get_long(ptr - 4) - 8; // size of BPTR + segment
 		uae_u32 addr = ptr + 4;
