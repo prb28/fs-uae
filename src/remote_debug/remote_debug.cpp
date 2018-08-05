@@ -59,7 +59,7 @@
 #include "execlib.h"
 #include "uae.h"
 
-extern int exception_debugging;
+//extern int exception_debugging;
 extern int debugger_active;
 static rconn* s_conn = 0;
 
@@ -743,7 +743,7 @@ static bool step()
 
     activate_debugger ();
 
-	exception_debugging = 0;
+	//exception_debugging = 0;
 	return true;
 }
 
@@ -756,7 +756,7 @@ static bool step_next_instruction () {
 
 	step_cpu = true;
 	did_step_cpu = true;
-	exception_debugging = 0;
+	//exception_debugging = 0;
 
 	debug_log("current pc 0x%08x - next pc 0x%08x\n", pc, nextpc);
 
@@ -829,8 +829,13 @@ static bool handle_multi_letter_packet (char* packet, int length)
 
 	if (!strcmp(packet, "vRun")) {
 		return handle_vrun (packet + 5);
+	} else if (!strcmp(packet, "vCtrlC")) {
+		set_special (SPCFLAG_BRK);
+		send_exception (true);
+		debug_log("switching to tracing\n");
+		s_state = Tracing;
+		return true;
 	} else {
-
 		send_packet_string ("");
 	}
 
@@ -884,7 +889,7 @@ static bool handle_thread ()
 static void deactive_debugger () {
 	set_special (SPCFLAG_BRK);
 	s_state = Running;
-	exception_debugging = 0;
+	//exception_debugging = 0;
 	debugger_active = 0;
     old_active_debugger = 0;
 
@@ -1362,11 +1367,11 @@ static void remote_debug_update_ (void)
 
 	remote_debug_ ();
     activate_debugger ();
-	exception_debugging = 0;
+	//exception_debugging = 0;
 
 	if (rconn_poll_read(s_conn)) {
 		activate_debugger ();
-		exception_debugging = 0;
+		//exception_debugging = 0;
 	}
 	if (vRunCalled) {
 		vRunCalled = !debugger_boot();
