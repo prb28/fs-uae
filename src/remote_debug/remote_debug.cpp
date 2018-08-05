@@ -63,12 +63,21 @@ extern int exception_debugging;
 extern int debugger_active;
 static rconn* s_conn = 0;
 
-//extern int debug_illegal;
-//extern uae_u64 debug_illegal_mask;
+extern int debug_illegal;
+extern uae_u64 debug_illegal_mask;
 
 extern bool debugger_boot();
 
 extern int debug_dma;
+
+#define GDB_SIGNAL_INT 2			// Interrupt
+#define GDB_SIGNAL_ILL 4			// Illegal instruction
+#define GDB_SIGNAL_TRAP 5			// Trace/breakpoint trap
+#define GDB_SIGNAL_EMT 7			// Emulation trap
+#define GDB_SIGNAL_FPE 8 			// Arithmetic exception
+#define GDB_SIGNAL_BUS 10			// Bus error
+#define GDB_SIGNAL_SEGV 11			// Segmentation fault
+
 static char s_exe_to_run[4096];
 
 static int old_active_debugger = 0;
@@ -88,6 +97,8 @@ static int debug_dma_frame = 0;
 static int dma_max_sizes[2][2];
 static segment_info s_segment_info[512];
 static int s_segment_count = 0;
+static int remote_debug_illegal = 0;
+static uae_u64 remote_debug_illegal_mask = 0;
 
 #define MAX_BREAKPOINT_COUNT 512
 
@@ -110,6 +121,9 @@ static bool did_step_cpu = false;
 static uae_u8 s_lastSent[1024];
 static int s_lastSize = 0;
 static unsigned int s_socket_update_count = 0;
+static int last_exception = 0;
+static bool last_exception_sent = true;
+static uae_u32 last_exception_pc = 0;
 
 bool need_ack = true;
 static bool vRunCalled = false;
@@ -171,7 +185,6 @@ static void remote_debug_init_ (int time_out)
 	debug_log("remote debugger active\n");
 
 	remote_debugging = 1;
-
 	// if time_out > 0 we wait that number of seconds for a connection to be made. If
 	// none has been done within the given time-frame we just continue
 
@@ -222,6 +235,12 @@ const int find_marker(const char* packet, const int offset, const char c, const 
     }
 
     return -1;
+}
+
+// Updated the parameters to activate the exception debugging
+static void update_debug_illegal() {
+	debug_illegal = remote_debug_illegal;
+	debug_illegal_mask = remote_debug_illegal_mask; //0b1111111000000010000011110000000000000000011111111111100; //1 << 4;
 }
 
 static const char s_hexchars [] = "0123456789abcdef";
@@ -607,65 +626,108 @@ static bool set_registers (const uae_u8* data)
 static int map_68k_exception(int exception) {
     int sig = 0;
 
-    if (exception == 4) {
-		uae_u32 exception_pc = x_get_long (m68k_areg (regs, 7) + 2);
-		debug_log("exception pc %08x\n", exception_pc);
-		m68k_setpc (exception_pc);
-    }
-
     switch (exception)
     {
-        case 2: sig = 10; break; // bus error
-        case 3: sig = 10; break; // address error
-        case 4: sig = 4; break; // illegal instruction
-        case 5: sig = 8; break; // zero divide
-        case 6: sig = 8; break; // chk instruction
-        case 7: sig = 8; break; // trapv instruction
-        case 8: sig = 11; break; // privilege violation
-        case 9: sig = 5; break; // trace trap
-        case 10: sig = 4; break; // line 1010 emulator
-        case 11: sig = 4; break; // line 1111 emulator
-        case 13: sig = 10; break; // Coprocessor protocol violation.  Using a standard MMU or FPU this cannot be triggered by software.  Call it a SIGBUS.
-        case 31: sig = 2; break; // interrupt
-        case 33: sig = 5; break; // breakpoint
-        case 34: sig = 5; break; // breakpoint
-        case 40: sig = 8; break; // floating point err
-        case 48: sig = 8; break; // floating point err
-        case 49: sig = 8; break; // floating point err
-        case 50: sig = 8; break; // zero divide
-        case 51: sig = 8; break; // underflow
-        case 52: sig = 8; break; // operand error
-        case 53: sig = 8; break; // overflow
-        case 54: sig = 8; break; // NAN
-        default: sig = 7; // "software generated"
+        case 2: sig = GDB_SIGNAL_BUS; break; // bus error
+        case 3: sig = GDB_SIGNAL_BUS; break; // address error
+        case 4: sig = GDB_SIGNAL_ILL; break; // illegal instruction
+        case 5: sig = GDB_SIGNAL_FPE; break; // zero divide
+        case 6: sig = GDB_SIGNAL_FPE; break; // chk instruction
+        case 7: sig = GDB_SIGNAL_FPE; break; // trapv instruction
+        case 8: sig = GDB_SIGNAL_SEGV; break; // privilege violation
+        case 9: sig = GDB_SIGNAL_TRAP; break; // trace trap
+        case 10: sig = GDB_SIGNAL_ILL; break; // line 1010 emulator
+        case 11: sig = GDB_SIGNAL_ILL; break; // line 1111 emulator
+        case 13: sig = GDB_SIGNAL_BUS; break; // Coprocessor protocol violation.  Using a standard MMU or FPU this cannot be triggered by software.  Call it a SIGBUS.
+        case 31: sig = GDB_SIGNAL_INT; break; // interrupt
+        case 32: sig = GDB_SIGNAL_TRAP; break; // interrupt
+        case 33: sig = GDB_SIGNAL_TRAP; break; // breakpoint
+        case 34: sig = GDB_SIGNAL_TRAP; break; // breakpoint
+        case 40: sig = GDB_SIGNAL_FPE; break; // floating point err
+        case 48: sig = GDB_SIGNAL_FPE; break; // floating point err
+        case 49: sig = GDB_SIGNAL_FPE; break; // floating point err
+        case 50: sig = GDB_SIGNAL_FPE; break; // zero divide
+        case 51: sig = GDB_SIGNAL_FPE; break; // underflow
+        case 52: sig = GDB_SIGNAL_FPE; break; // operand error
+        case 53: sig = GDB_SIGNAL_FPE; break; // overflow
+        case 54: sig = GDB_SIGNAL_FPE; break; // NAN
+        default: sig = GDB_SIGNAL_EMT; // "software generated"
+    }
+
+    if ((sig == GDB_SIGNAL_ILL) || (sig == GDB_SIGNAL_FPE)) {
+		debug_log("exception %08x pc %08x: sig %08x\n", exception, last_exception_pc, sig);
+		m68k_setpc (last_exception_pc);
     }
 
     return sig;
 }
 
 
-static bool send_exception (void) {
+static bool send_exception (bool detailed) {
 	// this function will just exit if already connected
 	rconn_update_listner(s_conn);
 
-	unsigned char buffer[16] = { 0 };
+	unsigned char messageBuffer[512] = { 0 };
+	uae_u8 *t = messageBuffer;
+	uae_u8 *buffer = messageBuffer;
 	int sig = 0;
 	if (regs.spcflags & SPCFLAG_BRK) {
 		// It's a breakpoint
-		debug_log("send spcflags %d\n", regs.spcflags);
+		debug_log("send breakpoint halt %d\n", regs.spcflags);
 		sig = 5;
 	} else {
 		// It's a cpu exception
-		debug_log("send exception %d\n", regs.exception);
-		sig = map_68k_exception(regs.exception);
+		debug_log("send exception %d\n", last_exception);
+		sig = map_68k_exception(last_exception);
 	}
 
-	buffer[0] = '$';
-	buffer[1] = 'S';
-	buffer[2] = s_hexchars[(sig >> 4) & 0xf];
-	buffer[3] = s_hexchars[(sig) & 0xf];
+	*buffer++ = '$';
+	if (detailed) {
+		*buffer++ = 'T';
+	} else  {
+		*buffer++ = 'S';
+	}
+	buffer = write_u8(buffer, sig);
+	*buffer++ = ' ';
 
-	return send_packet_in_place(buffer, 3);
+	int regId = 0xd0;
+	for (int i = 0; i < 8; ++i) {
+		buffer = write_u8(buffer, regId++);
+		*buffer++ = ':';
+		buffer = write_reg_32 (buffer, m68k_dreg (regs, i));
+		*buffer++ = ';';
+	}
+
+	regId = 0xa0;
+	for (int i = 0; i < 8; ++i) {
+		buffer = write_u8(buffer, regId++);
+		*buffer++ = ':';
+	    buffer = write_reg_32 (buffer, m68k_areg (regs, i));
+		*buffer++ = ';';
+	}
+
+	buffer = write_u8(buffer, 1);
+	*buffer++ = ':';
+    buffer = write_reg_32 (buffer, regs.sr);
+	*buffer++ = ';';
+	buffer = write_u8(buffer, 0);
+	*buffer++ = ':';
+    buffer = write_reg_32 (buffer, m68k_getpc ());
+
+    return send_packet_in_place(t, (int)((uintptr_t)buffer - (uintptr_t)t) - 1);
+}
+
+
+void remote_debug_check_exception_ (void) {
+	int	nr = regs.exception;
+	uae_u32 exception_pc = x_get_long (m68k_areg (regs, 7) + 2);
+	if ((nr > 0) && debug_illegal && (nr <= 63) && (debug_illegal_mask & ((uae_u64)1 << nr)))
+	{
+		debug_log("Exception raised pc 0x%08x - code 0x%08x\n", exception_pc, nr);
+		last_exception = nr;
+		last_exception_pc = exception_pc;
+		last_exception_sent = false;
+	}
 }
 
 static bool step()
@@ -681,7 +743,7 @@ static bool step()
 
     activate_debugger ();
 
-	exception_debugging = 1;
+	exception_debugging = 0;
 	return true;
 }
 
@@ -694,7 +756,7 @@ static bool step_next_instruction () {
 
 	step_cpu = true;
 	did_step_cpu = true;
-	exception_debugging = 1;
+	exception_debugging = 0;
 
 	debug_log("current pc 0x%08x - next pc 0x%08x\n", pc, nextpc);
 
@@ -989,18 +1051,53 @@ static bool set_breakpoint_address (char* packet, int add)
 	return reply_ok ();
 }
 
+// The message is z1,0,0;Xf,nnnnnnnnnnnnnnnn
+//  address is 0 : not used
+//  One parameter with 16 chars is the 64bit mask for exception filtering
+static bool set_exception_breakpoint (char* packet, int add) {
+	if (add < 1) {
+		debug_log("Disabling exception debugging\n");
+		remote_debug_illegal = 0;
+		remote_debug_illegal_mask = 0;
+		update_debug_illegal();
+		return reply_ok();
+	} else {
+		char mask[20] = {0};
+		uae_u32 size;
+		int scan_res = sscanf(packet, "0,0;X%x,%s#", &size, mask);
+		if (scan_res == 2)
+		{
+			debug_log("Mask read: %d\n", mask);
+			remote_debug_illegal = 1;
+			remote_debug_illegal_mask = strtoul(mask, NULL, 16);
+			update_debug_illegal();
+			return reply_ok();
+		}
+		else
+		{
+			debug_log("failed to parse memory packet: %s\n", packet);
+			send_packet_string ("");
+			return false;
+		}
+	}
+}
+
 static bool set_breakpoint (char* packet, int add)
 {
 	switch (*packet)
 	{
 		case '0' :
 		{
+			// software breakpoint
 			// skip zero and  ,
 			return set_breakpoint_address(packet + 2, add);
 		}
-
-		// Only 0 is supported now
-
+		case '1' :
+		{
+			// Hardware breakpoint : used for exception breakpoint
+			// skip 1 and  ,
+			return set_exception_breakpoint(packet + 2, add);
+		}
 		default:
 		{
 			debug_log("unknown breakpoint type\n");
@@ -1032,7 +1129,7 @@ static bool handle_packet(char* packet, int length)
 		case 'n' : return step_next_instruction ();
 		case 'H' : return handle_thread ();
 		case 'G' : return set_registers ((const uae_u8*)packet + 1);
-		case '?' : return send_exception ();
+		case '?' : return send_exception (true);
 		case 'k' : return kill_program ();
 		case 'm' : return send_memory (packet + 1);
 		case 'M' : return set_memory (packet + 1, length - 1);
@@ -1131,67 +1228,77 @@ static void remote_debug_ (void)
 {
 	uaecptr pc = m68k_getpc ();
 
-	// used when stepping over an instruction (useful to skip bsr/jsr/etc)
-
-	if (s_skip_to_pc != 0xffffffff)
-	{
-		set_special (SPCFLAG_BRK);
-
-		if (s_skip_to_pc == pc) {
-			send_exception ();
-			s_state = Tracing;
-			s_skip_to_pc = 0xffffffff;
-		}
+	// As an exception stored
+	if (!last_exception_sent && (last_exception > 0)) {
+		send_exception (true);
+		debug_log("switching to tracing\n");
+		s_state = Tracing;
+		last_exception_sent = true;
 	}
-
-	//debug_log("update remote-Debug %d\n", s_state);
-
-	for (int i = 0; i < s_breakpoint_count; ++i)
+	else
 	{
-		if (s_breakpoints[i].needs_resolve) {
-			continue;
-		}
+		// used when stepping over an instruction (useful to skip bsr/jsr/etc)
 
-		set_special (SPCFLAG_BRK);
-
-		//debug_log("checking breakpoint %08x - %08x\n", s_breakpoints[i].address, pc);
-
-		if (s_breakpoints[i].address == pc)
+		if (s_skip_to_pc != 0xffffffff)
 		{
-			//activate_debugger ();
-			send_exception ();
-			debug_log("switching to tracing\n");
-			s_state = Tracing;
-			break;
+			set_special (SPCFLAG_BRK);
+
+			if (s_skip_to_pc == pc) {
+				send_exception (true);
+				s_state = Tracing;
+				s_skip_to_pc = 0xffffffff;
+			}
 		}
-	}
 
-	if (s_state == TraceToProgram)
-	{
-		set_special (SPCFLAG_BRK);
+		//debug_log("update remote-Debug %d\n", s_state);
 
-		for (int i = 0, end = s_segment_count; i < end; ++i) {
-			const segment_info* seg = &s_segment_info[i];
+		for (int i = 0; i < s_breakpoint_count; ++i)
+		{
+			if (s_breakpoints[i].needs_resolve) {
+				continue;
+			}
 
-			uae_u32 seg_start = seg->address;
-			uae_u32 seg_end = seg->address + seg->size;
+			set_special (SPCFLAG_BRK);
 
-			if (pc >= seg_start && pc < seg_end) {
+			//debug_log("checking breakpoint %08x - %08x\n", s_breakpoints[i].address, pc);
+
+			if (s_breakpoints[i].address == pc)
+			{
+				//activate_debugger ();
+				send_exception (true);
 				debug_log("switching to tracing\n");
 				s_state = Tracing;
 				break;
 			}
 		}
-	}
 
-    /*
-	if (debugger_active == 1 && old_active_debugger == 0) {
-        did_step_cpu = true;
-        step_cpu = false;
-        s_state = Tracing;
-        old_active_debugger = 1;
-    }
-    */
+		if (s_state == TraceToProgram)
+		{
+			set_special (SPCFLAG_BRK);
+
+			for (int i = 0, end = s_segment_count; i < end; ++i) {
+				const segment_info* seg = &s_segment_info[i];
+
+				uae_u32 seg_start = seg->address;
+				uae_u32 seg_end = seg->address + seg->size;
+
+				if (pc >= seg_start && pc < seg_end) {
+					debug_log("switching to tracing\n");
+					s_state = Tracing;
+					break;
+				}
+			}
+		}
+
+		/*
+		if (debugger_active == 1 && old_active_debugger == 0) {
+			did_step_cpu = true;
+			step_cpu = false;
+			s_state = Tracing;
+			old_active_debugger = 1;
+		}
+		*/
+	}
 
 	// Check if we hit some breakpoint and then switch to tracing if we do
 
@@ -1209,7 +1316,7 @@ static void remote_debug_ (void)
 		{
 			if (did_step_cpu) {
 				debug_log("did step cpu\n");
-				send_exception ();
+				send_exception (true);
 				did_step_cpu = false;
 			}
 
@@ -1255,9 +1362,11 @@ static void remote_debug_update_ (void)
 
 	remote_debug_ ();
     activate_debugger ();
+	exception_debugging = 0;
 
 	if (rconn_poll_read(s_conn)) {
 		activate_debugger ();
+		exception_debugging = 0;
 	}
 	if (vRunCalled) {
 		vRunCalled = !debugger_boot();
@@ -1284,11 +1393,6 @@ void remote_debug_start_executable (struct TrapContext *context)
 	uaecptr filename = ds (_T(s_exe_to_run));
 	uaecptr args = ds (_T(""));
 #endif
-
-	//debug_illegal = 1;
-
-	// trap illegal
-	//debug_illegal_mask = 1 << 4;
 
 	// so this is a hack to say that we aren't running from cli
 
@@ -1374,6 +1478,7 @@ void remote_debug_start_executable (struct TrapContext *context)
 	context_set_dreg(context, 3, args);
 	context_set_dreg(context, 4, 0);
 
+	update_debug_illegal();
 	deactive_debugger ();
 
 	debug_log("remote_debug_start_executable\n");
@@ -1397,7 +1502,7 @@ extern "C"
 	void remote_debug_init(int time_out) { return remote_debug_init_(time_out); }
 	void remote_debug(void) { remote_debug_(); }
 	void remote_debug_update(void) { remote_debug_update_(); }
-
+	void remote_debug_check_exception(void) { remote_debug_check_exception_(); }
 }
 
 #endif

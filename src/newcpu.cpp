@@ -2991,7 +2991,7 @@ static void ExceptionX (int nr, uaecptr address)
 			Exception_normal (nr);
 		}
 
-	if (debug_illegal && !in_rom (M68K_GETPC)) {
+	if (debug_illegal){ // && !in_rom (M68K_GETPC)) { // Can catch rom exceptions : illegal instruction
 		if (nr <= 63 && (debug_illegal_mask & ((uae_u64)1 << nr))) {
 			write_log (_T("Exception %d breakpoint\n"), nr);
 			activate_debugger ();

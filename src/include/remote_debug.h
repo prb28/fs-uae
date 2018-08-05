@@ -45,6 +45,7 @@ void remote_debug_update (void);
 
 void remote_debug_start_executable (struct TrapContext* ctx);
 void remote_debug_end_executable (struct TrapContext* ctx);
+void remote_debug_check_exception();
 
 #ifdef __cplusplus
 }

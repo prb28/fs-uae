@@ -94,13 +94,23 @@ void deactivate_debugger (void)
 
 void activate_debugger (void)
 {
-	do_skip = 0;
-	if (debugger_active)
-		return;
-	debugger_active = 1;
-	set_special (SPCFLAG_BRK);
-	debugging = 1;
-	mmu_triggered = 0;
+#ifdef REMOTE_DEBUGGER
+	if (remote_debugging) {
+		remote_debug_check_exception ();
+	}
+#else
+	if (notinrom()) {
+#endif
+		do_skip = 0;
+		if (debugger_active)
+			return;
+		debugger_active = 1;
+		set_special (SPCFLAG_BRK);
+		debugging = 1;
+		mmu_triggered = 0;
+#ifndef REMOTE_DEBUGGER
+	}
+#endif
 }
 
 bool debug_enforcer(void)
