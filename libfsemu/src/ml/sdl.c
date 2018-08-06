@@ -26,7 +26,6 @@
 
 #include <fs/conf.h>
 #include <fs/lazyness.h>
-// #include <GLee.h>
 #ifdef WITH_GLEW
 #include <GL/glew.h>
 #endif
@@ -328,6 +327,16 @@ static void set_video_mode()
     if (fs_config_get_boolean("window_border") == 0) {
         fs_log("borderless window requested\n");
         flags |= SDL_WINDOW_BORDERLESS;
+    }
+
+    // special flags for command line usage
+    if (fs_config_get_boolean("window_hidden") == 1) {
+        fs_log("hidden window requested\n");
+        flags |= SDL_WINDOW_HIDDEN;
+    }
+    if (fs_config_get_boolean("window_minimized") == 1) {
+        fs_log("minimized window requested\n");
+        flags |= SDL_WINDOW_MINIMIZED;
     }
 
 #if 0
@@ -1081,7 +1090,7 @@ int fs_ml_event_loop(void)
             //printf("ISREL %d\n", SDL_GetRelativeMouseMode());
 
             if (g_fs_log_input) {
-                fs_log("SDL mouse event x: %4d y: %4d xrel: %4d yrel: %4d\n", 
+                fs_log("SDL mouse event x: %4d y: %4d xrel: %4d yrel: %4d\n",
                     event.motion.x, event.motion.y,
                     event.motion.xrel, event.motion.yrel);
             }

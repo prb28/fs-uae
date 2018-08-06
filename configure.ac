@@ -2,7 +2,7 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ([2.67])
-AC_INIT([FS-UAE], [2.9.6dev1],
+AC_INIT([FS-UAE], [2.9.7dev5],
         [frode@fs-uae.net], [fs-uae], [https://fs-uae.net])
 AC_CONFIG_AUX_DIR([.])
 AC_CANONICAL_HOST
@@ -126,11 +126,29 @@ AX_CHECK_COMPILE_FLAG(-Wmissing-format-attribute,
 AM_CONDITIONAL([W_MISSING_FORMAT_ATTRIBUTE],
 [test x$w_missing_format_attribute = xyes])
 
+AX_CHECK_COMPILE_FLAG(-fno-pie,
+[fno_pie=yes],
+[fno_pie=no])
+AM_CONDITIONAL([FNO_PIE],
+[test x$fno_pie = xyes])
+
+AX_CHECK_COMPILE_FLAG(-fno-PIE,
+[fno_pie_cap=yes],
+[fno_pie_cap=no])
+AM_CONDITIONAL([FNO_PIE_CAP],
+[test x$fno_pie_cap = xyes])
+
 AX_CHECK_LINK_FLAG(-no-pie,
 [no_pie=yes],
 [no_pie=no])
 AM_CONDITIONAL([NO_PIE],
 [test x$no_pie = xyes])
+
+# AX_CHECK_LINK_FLAG([-Wl,-Tdata=0x10000000],
+# [wl_tdata=yes],
+# [wl_tdata=no])
+# AM_CONDITIONAL([WL_TDATA],
+# [test x$wl_tdata = xyes])
 
 AX_C___BUILTIN_EXPECT
 
@@ -166,8 +184,6 @@ AC_DEFINE([USE_GLIB], [1], [Define to 1 to use GLib])
 PKG_CHECK_MODULES([GLIB], [glib-2.0 >= 2.32 gthread-2.0])
 
 AC_CHECK_LIB([Iphlpapi], [main])
-
-AM_CONDITIONAL([BUILTIN_GLEE], [false])
 
 AC_ARG_WITH(glad, AS_HELP_STRING(
     [--without-glad], [use GLAD OpenGL loader]))
@@ -312,8 +328,8 @@ AS_CASE([$host_os],
     OS_NAME_2="Windows"
     OS_NAME_3="Windows"
     OS_CPPFLAGS="-DWINDOWS"
-    AS_CASE([$host_os],
-    [mingw64], [
+    AS_CASE([$host_cpu],
+    [x86_64], [
         OS_LDFLAGS="-mwindows"
         PACKAGE_ARCH="x86-64"
     ], [
@@ -456,6 +472,8 @@ AC_CHECK_MEMBERS([struct stat.st_mtimespec.tv_nsec])
 AC_CHECK_MEMBERS([struct stat.st_mtime_nsec])
 AC_CHECK_MEMBERS([struct in_addr.S_un])
 AC_CHECK_MEMBERS([struct ucontext.uc_mcontext.gregs],
+	[], [], [[#include <sys/ucontext.h>]])
+AC_CHECK_MEMBERS([struct ucontext_t.uc_mcontext.gregs],
 	[], [], [[#include <sys/ucontext.h>]])
 
 AC_CHECK_TYPES([ptrdiff_t])
@@ -764,8 +782,8 @@ AC_CONFIG_SUBDIRS([libmpeg2])
 
 AC_CONFIG_FILES([
     dist/linux/Makefile
-    dist/macosx/Info.plist
-    dist/macosx/Makefile
+    dist/macos/Info.plist
+    dist/macos/Makefile
     dist/steamos/Makefile
     dist/windows/fs-uae.iss
     dist/windows/Makefile

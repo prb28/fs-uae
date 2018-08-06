@@ -6,6 +6,7 @@
 #include <fs/emu/log.h>
 #include <fs/emu/options.h>
 #include <fs/emu/render.h>
+#include <fs/ml/opengl.h>
 #include <fs/conf.h>
 #include <assert.h>
 #include <string.h>
@@ -17,6 +18,7 @@ static double g_scale_y = -1.0;
 static double g_align_x = 0.5;
 static double g_align_y = 0.5;
 static bool g_render_frame = true;
+static double g_force_aspect = 0.0;
 
 int fse_stretch_mode(void)
 {
@@ -113,9 +115,12 @@ void fse_calculate_video_rectangle(
             /* No scaling change needed. */
         } else {
             double pixel_aspect = 1.0;
-            if (stretch_mode == FSE_STRETCH_ASPECT) {
+            if (g_force_aspect != 0) {
+                pixel_aspect = ((double) video_w / video_h) / (g_force_aspect);
+            } else if (stretch_mode == FSE_STRETCH_ASPECT) {
                 pixel_aspect = fse_pixel_aspect();
             }
+
             double render_aspect = (double) render_w / render_h;
             double aspect = ((double) video_w / video_h) / pixel_aspect;
             if (aspect < render_aspect) {
@@ -209,11 +214,20 @@ void fse_render_frame(void)
     int frame_width = 256 * fse_render.height / 1080;
     if (fse_render.view_x > 0) {
         fse_render_image_with_size(
-                TEXTURE_FRAME_LEFT, fse_render.view_x - frame_width,
+                TEXTURE_BEZEL_LEFT, fse_render.view_x - frame_width,
                     0, frame_width, fse_render.height);
         fse_render_image_with_size(
-                TEXTURE_FRAME_RIGHT, fse_render.view_x + fse_render.view_w,
+                TEXTURE_BEZEL_RIGHT, fse_render.view_x + fse_render.view_w,
                     0, frame_width, fse_render.height);
+        int overlay_width = 32;
+        fs_gl_blending(true);
+        fse_render_image_with_size(
+                TEXTURE_BEZEL_LEFT_OVERLAY, fse_render.view_x,
+                    0, overlay_width, fse_render.height);
+        fse_render_image_with_size(
+                TEXTURE_BEZEL_RIGHT_OVERLAY,
+                    fse_render.view_x + fse_render.view_w - overlay_width,
+                    0, overlay_width, fse_render.height);
     }
 }
 
@@ -279,7 +293,12 @@ void fse_init_render(void)
     }
     fse_set_scale_mode(scale_mode);
 
-    if (fs_config_false(OPTION_FRAME)) {
+    if (fs_config_false(OPTION_BEZEL)) {
         g_render_frame = false;
+    }
+
+    g_force_aspect = fs_config_get_double("force_aspect");
+    if (g_force_aspect == FS_CONFIG_NONE) {
+        g_force_aspect = 0;
     }
 }
