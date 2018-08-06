@@ -10,11 +10,13 @@
 #include <Ws2tcpip.h>
 #endif
 
+#if defined(WINDOWS)
+#include <ws2tcpip.h>
+#endif
 #if !defined(_WIN32)
 #include <sys/types.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
-#include <unistd.h>
 #include <netinet/in.h>
 #include <netdb.h>
 #include <arpa/inet.h>
@@ -25,7 +27,7 @@
 #endif
 
 #ifndef INVALID_SOCKET
-#define INVALID_SOCKET -1
+#define INVALID_SOCKET 0
 #endif
 
 #if !defined(_WIN32)
@@ -42,8 +44,8 @@ typedef struct rconn
 {
     enum ConnectionType type;
 
-    int server_socket;     // used when having a listener socket
-    int socket;
+    SOCKET server_socket;     // used when having a listener socket
+    SOCKET socket;
 
 } rconn;
 
