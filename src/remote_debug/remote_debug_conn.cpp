@@ -27,7 +27,7 @@
 #endif
 
 #ifndef INVALID_SOCKET
-#define INVALID_SOCKET 0
+#define INVALID_SOCKET -1
 #endif
 
 #if !defined(_WIN32)
