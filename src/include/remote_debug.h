@@ -51,6 +51,15 @@ void remote_debug_check_exception();
 }
 #endif
 
+
+// Error codes for the remote protocol
+#define ERROR_SEND_MEMORY_PARSE               "E0f" // Error during the packet parse for command send memory
+#define ERROR_SET_MEMORY_PARSE                "E10" // Error during the packet parse for command set memory
+#define ERROR_SET_MEMORY_PARSE_MISSING_END    "E11" // Missing end packet for a set memory message
+#define ERROR_SET_MEMORY_INVALID_ADDRESS      "E12" // Address not safe for a set memory command
+#define ERROR_SET_REGISTER_PARSE              "E13" // Error during the packet parse for command set register
+#define ERROR_SET_REGISTER_PARSE_NAME_INVALID "E14" // Invalid register name for command set register
+
 #endif // REMOTE_DEBUGGER
 
 #endif // UATE_REMOTE_DEBUG

@@ -441,7 +441,7 @@ static bool send_memory (char* packet)
     if (sscanf (packet, "%x,%x:", &address, &size) != 2)
     {
         debug_log("failed to parse memory packet: %s\n", packet);
-        send_packet_string ("E01");
+        send_packet_string (ERROR_SEND_MEMORY_PARSE);
         return false;
     }
 
@@ -480,7 +480,7 @@ bool set_memory (char* packet, int packet_length)
 
     if (sscanf (packet, "%x,%x:", &address, &size) != 2) {
 	debug_log("failed to parse set_memory packet: %s\n", packet);
-	send_packet_string ("E01");
+	send_packet_string (ERROR_SET_MEMORY_PARSE);
 	return false;
     }
 
@@ -495,7 +495,7 @@ bool set_memory (char* packet, int packet_length)
 
     if (memory_start == 0) {
 	debug_log ("Unable to find end tag for packet %s\n", packet);
-	send_packet_string ("E01");
+	send_packet_string (ERROR_SET_MEMORY_PARSE_MISSING_END);
 	return false;
     }
 
@@ -506,7 +506,7 @@ bool set_memory (char* packet, int packet_length)
     for (int i = 0; i < size; ++i)
     {
 	if (!safe_addr (address, 1)) {
-	    send_packet_string ("E01");
+	    send_packet_string (ERROR_SET_MEMORY_INVALID_ADDRESS);
 	    return false;
 	}
 
@@ -530,13 +530,13 @@ bool set_register (char* packet, int packet_length)
 
 	if (sscanf (packet, "%c%d=%x#", &regType, &registerNumber, &value) != 3) {
 		debug_log("failed to parse set_register packet: %s\n", packet);
-		send_packet_string ("E01");
+		send_packet_string (ERROR_SET_REGISTER_PARSE);
 		return false;
     }
 
 	if ((registerNumber < 0) || (registerNumber > 7)) {
 		debug_log("The register name '%s' is invalid\n", name);
-		send_packet_string ("E01");
+		send_packet_string (ERROR_SET_REGISTER_PARSE_NAME_INVALID);
 		return false;
 	}
 
@@ -546,7 +546,7 @@ bool set_register (char* packet, int packet_length)
 		m68k_areg (regs, registerNumber) = value;
 	} else {
 		debug_log("The register name '%s' is invalid\n", name);
-		send_packet_string ("E01");
+		send_packet_string (ERROR_SET_REGISTER_PARSE_NAME_INVALID);
 		return false;
 	}
 
