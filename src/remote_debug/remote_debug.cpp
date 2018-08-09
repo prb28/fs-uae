@@ -167,19 +167,20 @@ static void debug_log(const char *format, ...)
 }
 
 //
+// port allows to modify the server socket port
 // time_out allows to set the time UAE will wait at startup for a connection.
 // This is useful when wanting to debug things at early startup.
 // If this is zero no time-out is set and if -1 no remote connection will be setup
 //
 
-static void remote_debug_init_ (int time_out)
+static void remote_debug_init_ (int port, int time_out)
 {
 	if (s_conn || time_out < 0)
 		return;
 
 	debug_log("creating connection...\n");
 
-	if (!(s_conn = rconn_create (ConnectionType_Listener, 6860)))
+	if (!(s_conn = rconn_create (ConnectionType_Listener, port)))
 		return;
 
 	debug_log("remote debugger active\n");
@@ -1504,7 +1505,7 @@ void remote_debug_end_executable (struct TrapContext *context)
 extern "C"
 {
 
-	void remote_debug_init(int time_out) { return remote_debug_init_(time_out); }
+	void remote_debug_init(int port, int time_out) { return remote_debug_init_(port, time_out); }
 	void remote_debug(void) { remote_debug_(); }
 	void remote_debug_update(void) { remote_debug_update_(); }
 	void remote_debug_check_exception(void) { remote_debug_check_exception_(); }

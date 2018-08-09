@@ -28,12 +28,13 @@ extern int remote_debugging;
 struct TrapContext;
 
 //
+// port allows to modify the server socket port
 // time_out allows to set the time UAE will wait at startup for a connection.
 // This is useful when wanting to debug things at early startup.
 // If this is zero no time-out is set and if -1 no remote connection will be setup
 //
 
-void remote_debug_init (int time_out);
+void remote_debug_init (int port, int time_out);
 
 // Main function that will be called when doing the actual debugging
 
@@ -51,6 +52,8 @@ void remote_debug_check_exception();
 }
 #endif
 
+// Default server socket port
+#define REMOTE_DEBUGGER_DEFAULT_PORT 6860
 
 // Error codes for the remote protocol
 #define ERROR_SEND_MEMORY_PARSE               "E0f" // Error during the packet parse for command send memory

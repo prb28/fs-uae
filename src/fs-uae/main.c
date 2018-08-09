@@ -1302,13 +1302,17 @@ int main(int argc, char *argv[])
 
 #ifdef REMOTE_DEBUGGER
 	int remote_debugger = fs_config_get_int("remote_debugger");
+    int remote_debugger_port = fs_config_get_int("remote_debugger_port");
 
 	if (remote_debugger != FS_CONFIG_NONE) {
 		// -1 as 0 means no time-out but the user will send in 1 to enable the remote debugger to
 		// make sure this config setting works similar to other settings. Values > 1 will result
 		// in the code waiting for x number of seconds for the remote debugger to connect.
 		// If the value ends up being negative no setup will be done.
-		remote_debug_init(remote_debugger - 1);
+    	if (remote_debugger_port == FS_CONFIG_NONE) {
+            remote_debugger_port = REMOTE_DEBUGGER_DEFAULT_PORT;
+        }
+        remote_debug_init(remote_debugger_port, remote_debugger - 1);
 	}
 #endif
 
