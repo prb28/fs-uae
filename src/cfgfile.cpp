@@ -341,44 +341,6 @@ static const TCHAR *obsolete[] = {
 
 #define UNEXPANDED _T("$(FILE_PATH)")
 
-static TCHAR *cfgfile_option_find_it(const TCHAR *s, const TCHAR *option, bool checkequals)
-{
-	TCHAR buf[MAX_DPATH];
-	if (!s)
-		return NULL;
-	_tcscpy(buf, s);
-	_tcscat(buf, _T(","));
-	TCHAR *p = buf;
-	for (;;) {
-		TCHAR *tmpp = _tcschr(p, ',');
-		TCHAR *tmpp2 = NULL;
-		if (tmpp == NULL)
-			return NULL;
-		*tmpp++ = 0;
-		if (checkequals) {
-			tmpp2 = _tcschr(p, '=');
-			if (tmpp2)
-				*tmpp2++ = 0;
-		}
-		if (!strcasecmp(p, option)) {
-			if (checkequals && tmpp2)
-				return tmpp2;
-			return p;
-		}
-		p = tmpp;
-	}
-}
-
-static bool cfgfile_option_find(const TCHAR *s, const TCHAR *option)
-{
-	return cfgfile_option_find_it(s, option, false) != NULL;
-}
-
-static TCHAR *cfgfile_option_get(const TCHAR *s, const TCHAR *option)
-{
-	return cfgfile_option_find_it(s, option, true);
-}
-
 static void trimwsa (char *s)
 {
 	/* Delete trailing whitespace.  */
@@ -469,10 +431,10 @@ static TCHAR *cfgfile_escape (const TCHAR *s, const TCHAR *escstr, bool quote)
 	*p = 0;
 	return s2;
 }
-static TCHAR *cfgfile_unescape (const TCHAR *s, const TCHAR **endpos, TCHAR separator)
+static TCHAR *cfgfile_unescape(const TCHAR *s, const TCHAR **endpos, TCHAR separator, bool min)
 {
 	bool quoted = false;
-	TCHAR *s2 = xmalloc (TCHAR, _tcslen (s) + 1);
+	TCHAR *s2 = xmalloc(TCHAR, _tcslen(s) + 1);
 	TCHAR *p = s2;
 	if (s[0] == '\"') {
 		s++;
@@ -489,33 +451,34 @@ static TCHAR *cfgfile_unescape (const TCHAR *s, const TCHAR **endpos, TCHAR sepa
 			i++;
 			break;
 		}
-		if (c == '\\') {
+		if (c == '\\' && !min) {
 			char v = 0;
 			TCHAR c2;
 			c = s[i + 1];
 			switch (c)
 			{
-				case 'X':
-				case 'x':
-				c2 = _totupper (s[i + 2]);
+			case 'X':
+			case 'x':
+				c2 = _totupper(s[i + 2]);
 				v = ((c2 >= 'A') ? c2 - 'A' : c2 - '0') << 4;
-				c2 = _totupper (s[i + 3]);
+				c2 = _totupper(s[i + 3]);
 				v |= (c2 >= 'A') ? c2 - 'A' : c2 - '0';
 				*p++ = c2;
 				i += 2;
 				break;
-				case 'r':
+			case 'r':
 				*p++ = '\r';
 				break;
-				case '\n':
+			case '\n':
 				*p++ = '\n';
 				break;
-				default:
+			default:
 				*p++ = c;
 				break;
 			}
 			i++;
-		} else {
+		}
+		else {
 			*p++ = c;
 		}
 	}
@@ -524,9 +487,58 @@ static TCHAR *cfgfile_unescape (const TCHAR *s, const TCHAR **endpos, TCHAR sepa
 		*endpos = &s[i];
 	return s2;
 }
-static TCHAR *cfgfile_unescape (const TCHAR *s, const TCHAR **endpos)
+static TCHAR *cfgfile_unescape(const TCHAR *s, const TCHAR **endpos)
 {
-	return cfgfile_unescape (s, endpos, 0);
+	return cfgfile_unescape(s, endpos, 0, false);
+}
+static TCHAR *cfgfile_unescape_min(const TCHAR *s)
+{
+	return cfgfile_unescape(s, NULL, 0, true);
+}
+
+static TCHAR *cfgfile_option_find_it(const TCHAR *s, const TCHAR *option, bool checkequals)
+{
+	TCHAR buf[MAX_DPATH];
+	if (!s)
+		return NULL;
+	_tcscpy(buf, s);
+	_tcscat(buf, _T(","));
+	TCHAR *p = buf;
+	for (;;) {
+		TCHAR *tmpp = _tcschr(p, ',');
+		TCHAR *tmpp2 = NULL;
+		if (tmpp == NULL)
+			return NULL;
+		*tmpp++ = 0;
+		if (checkequals) {
+			tmpp2 = _tcschr(p, '=');
+			if (tmpp2)
+				*tmpp2++ = 0;
+		}
+		if (!strcasecmp(p, option)) {
+			if (checkequals && tmpp2) {
+				if (tmpp2[0] == '"') {
+					TCHAR *n = cfgfile_unescape_min(tmpp2);
+					return n;
+				}
+				return my_strdup(tmpp2);
+			}
+			return my_strdup(p);
+		}
+		p = tmpp;
+	}
+}
+
+bool cfgfile_option_find(const TCHAR *s, const TCHAR *option)
+{
+	TCHAR *ss = cfgfile_option_find_it(s, option, false);
+	xfree(ss);
+	return ss != NULL;
+}
+
+TCHAR *cfgfile_option_get(const TCHAR *s, const TCHAR *option)
+{
+	return cfgfile_option_find_it(s, option, true);
 }
 
 static TCHAR *getnextentry (const TCHAR **valuep, const TCHAR separator)
@@ -543,7 +555,7 @@ static TCHAR *getnextentry (const TCHAR **valuep, const TCHAR separator)
 		value++;
 		*valuep = value;
 	} else {
-		s = cfgfile_unescape (value, valuep, separator);
+		s = cfgfile_unescape (value, valuep, separator, false);
 	}
 	return s;
 }

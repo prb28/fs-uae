@@ -54,6 +54,17 @@
 #undef _WIN32
 #endif
 
+#define TRACE_SKIP_INS 1
+#define TRACE_MATCH_PC 2
+#define TRACE_MATCH_INS 3
+#define TRACE_RANGE_PC 4
+#define TRACE_SKIP_LINE 5
+#define TRACE_CHECKONLY 10
+
+static int trace_mode;
+static uae_u32 trace_param1;
+static uae_u32 trace_param2;
+
 int debugger_active;
 static uaecptr skipaddr_start, skipaddr_end;
 static int skipaddr_doskip;
@@ -73,6 +84,7 @@ int debug_illegal = 0;
 uae_u64 debug_illegal_mask;
 static int debug_mmu_mode;
 static bool break_if_enforcer;
+static uaecptr debug_pc;
 
 static uaecptr processptr;
 static uae_char *processname;
@@ -111,6 +123,20 @@ void activate_debugger (void)
 #ifndef REMOTE_DEBUGGER
 	}
 #endif
+}
+
+void activate_debugger_new(void)
+{
+	activate_debugger();
+	debug_pc = M68K_GETPC;
+}
+
+void activate_debugger_new_pc(uaecptr pc, int len)
+{
+	activate_debugger();
+	trace_mode = TRACE_RANGE_PC;
+	trace_param1 = pc;
+	trace_param2 = pc + len;
 }
 
 bool debug_enforcer(void)

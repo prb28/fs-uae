@@ -28,6 +28,7 @@
 #include "autoconf.h"
 #include "traps.h"
 #include "debug.h"
+#include "debugmem.h"
 #include "gui.h"
 #include "savestate.h"
 #include "blitter.h"
@@ -2405,6 +2406,7 @@ kludge_me_do:
 		return;
 	}
 	m68k_setpc (newpc);
+	branch_stack_push(currpc, currpc);
 	regs.ir = x_get_word (m68k_getpc ()); // prefetch 1
 	x_do_cycles (2 * cpucycleunit);
 	regs.ipl_pin = intlev();
@@ -2745,8 +2747,11 @@ static void add_approximate_exception_cycles(int nr)
 
 static void Exception_normal (int nr)
 {
-	uae_u32 currpc, newpc;
+	uae_u32 newpc;
+	uae_u32 currpc = m68k_getpc();
+	uae_u32 nextpc;
 	int sv = regs.s;
+
 	int interrupt;
 	int vector_nr = nr;
 
@@ -2788,6 +2793,7 @@ static void Exception_normal (int nr)
 
 	if (currprefs.cpu_model > 68000) {
 		currpc = exception_pc (nr);
+		nextpc = currpc;
 		if (nr == 2 || nr == 3) {
 			int i;
 			if (currprefs.cpu_model >= 68040) {
@@ -2920,6 +2926,7 @@ static void Exception_normal (int nr)
 	} else {
 		add_approximate_exception_cycles(nr);
 		currpc = m68k_getpc ();
+		nextpc = currpc;
 		if (nr == 2 || nr == 3) {
 			// 68000 address error
 			uae_u16 mode = (sv ? 4 : 0) | (last_instructionaccess_for_exception_3 ? 2 : 1);
@@ -2956,6 +2963,7 @@ kludge_me_do:
 #ifdef JIT
 	set_special (SPCFLAG_END_COMPILE);
 #endif
+	branch_stack_push(currpc, nextpc);
 	fill_prefetch ();
 	exception_trace (nr);
 }
@@ -2972,7 +2980,9 @@ static void ExceptionX (int nr, uaecptr address)
 #endif
 		cputrace.state = nr;
 	}
-
+	if (!regs.s) {
+		regs.instruction_pc_user_exception = m68k_getpc();
+	}
 #ifdef JIT
 	if (currprefs.cachesize)
 		regs.instruction_pc = address == -1 ? m68k_getpc () : address;

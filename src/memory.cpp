@@ -33,6 +33,7 @@
 #include "a2091.h"
 #include "gayle.h"
 #include "debug.h"
+#include "debugmem.h"
 #include "gfxboard.h"
 #include "cpuboard.h"
 #include "uae/ppc.h"
@@ -139,6 +140,13 @@ __inline__ void byteput (uaecptr addr, uae_u32 b)
 }
 #endif
 
+extern bool debugmem_initialized;
+
+bool real_address_allowed(void)
+{
+	return debugmem_initialized == false;
+}
+
 int addr_valid (const TCHAR *txt, uaecptr addr, uae_u32 len)
 {
 	addrbank *ab = &get_mem_bank(addr);
@@ -180,6 +188,10 @@ static void dummylog (int rw, uaecptr addr, int size, uae_u32 val, int ins)
 	if (addr >= 0x07f00000 && addr <= 0x07f00007)
 		return;
 	if (addr >= 0x07f7fff0 && addr <= 0x07ffffff)
+		return;
+	if (debugmem_extinvalidmem(addr, val, rw ? size : -size))
+		return;
+	if (illegal_count >= MAX_ILG && MAX_ILG > 0)
 		return;
 	if (MAX_ILG >= 0)
 		illegal_count++;
@@ -775,6 +787,51 @@ STATIC_INLINE uae_u8* REGPARAM2 chipmem_xlate_bigmem (uaecptr addr)
 	return get_real_address (addr);
 }
 
+STATIC_INLINE void REGPARAM2 chipmem_lput_debugmem(uaecptr addr, uae_u32 v)
+{
+	if (addr < debugmem_chiplimit)
+		debugmem_chiphit(addr, v, 4);
+	put_long(addr, v);
+}
+STATIC_INLINE void REGPARAM2 chipmem_wput_debugmem(uaecptr addr, uae_u32 v)
+{
+	if (addr < debugmem_chiplimit)
+		debugmem_chiphit(addr, v, 2);
+	put_word(addr, v);
+}
+STATIC_INLINE void REGPARAM2 chipmem_bput_debugmem(uaecptr addr, uae_u32 v)
+{
+	if (addr < debugmem_chiplimit)
+		debugmem_chiphit(addr, v, 1);
+	put_byte(addr, v);
+}
+STATIC_INLINE uae_u32 REGPARAM2 chipmem_lget_debugmem(uaecptr addr)
+{
+	if (addr < debugmem_chiplimit)
+		return debugmem_chiphit(addr, 0, -4);
+	return get_long(addr);
+}
+STATIC_INLINE uae_u32 REGPARAM2 chipmem_wget_debugmem(uaecptr addr)
+{
+	if (addr < debugmem_chiplimit)
+		return debugmem_chiphit(addr, 0, -2);
+	return get_word(addr);
+}
+STATIC_INLINE uae_u32 REGPARAM2 chipmem_bget_debugmem(uaecptr addr)
+{
+	if (addr < debugmem_chiplimit)
+		return debugmem_chiphit(addr, 0, -1);
+	return get_byte(addr);
+}
+STATIC_INLINE int REGPARAM2 chipmem_check_debugmem(uaecptr addr, uae_u32 size)
+{
+	return valid_address(addr, size);
+}
+STATIC_INLINE uae_u8* REGPARAM2 chipmem_xlate_debugmem(uaecptr addr)
+{
+	return get_real_address(addr);
+}
+
 uae_u32 (REGPARAM2 *chipmem_lget_indirect)(uaecptr);
 uae_u32 (REGPARAM2 *chipmem_wget_indirect)(uaecptr);
 uae_u32 (REGPARAM2 *chipmem_bget_indirect)(uaecptr);
@@ -784,9 +841,18 @@ void (REGPARAM2 *chipmem_bput_indirect)(uaecptr, uae_u32);
 int (REGPARAM2 *chipmem_check_indirect)(uaecptr, uae_u32);
 uae_u8 *(REGPARAM2 *chipmem_xlate_indirect)(uaecptr);
 
-static void chipmem_setindirect (void)
+void chipmem_setindirect(void)
 {
-	if (currprefs.z3chipmem_size) {
+	if (debugmem_bank.baseaddr && debugmem_chiplimit) {
+		chipmem_lget_indirect = chipmem_lget_debugmem;
+		chipmem_wget_indirect = chipmem_wget_debugmem;
+		chipmem_bget_indirect = chipmem_bget_debugmem;
+		chipmem_lput_indirect = chipmem_lput_debugmem;
+		chipmem_wput_indirect = chipmem_wput_debugmem;
+		chipmem_bput_indirect = chipmem_bput_debugmem;
+		chipmem_check_indirect = chipmem_check_bigmem;
+		chipmem_xlate_indirect = chipmem_xlate_bigmem;
+	} else if (currprefs.z3chipmem_size) {
 		chipmem_lget_indirect = chipmem_lget_bigmem;
 		chipmem_wget_indirect = chipmem_wget_bigmem;
 		chipmem_bget_indirect = chipmem_bget_bigmem;
@@ -824,6 +890,11 @@ MEMORY_FUNCTIONS(a3000hmem);
 
 MEMORY_FUNCTIONS(mem25bit);
 
+/* debugger memory */
+
+MEMORY_FUNCTIONS(debugmem);
+MEMORY_WGETI(debugmem);
+MEMORY_LGETI(debugmem);
 
 /* Kick memory */
 
@@ -1140,6 +1211,14 @@ addrbank mem25bit_bank = {
 	mem25bit_xlate, mem25bit_check, NULL, _T("25bitmem"), _T("25bit memory"),
 	mem25bit_lget, mem25bit_wget,
 	ABFLAG_RAM | ABFLAG_THREADSAFE, 0, 0
+};
+
+addrbank debugmem_bank = {
+	debugmem_lget, debugmem_wget, debugmem_bget,
+	debugmem_lput, debugmem_wput, debugmem_bput,
+	debugmem_xlate, debugmem_check, NULL, _T("debugmem"), _T("debugger memory"),
+	debugmem_lgeti, debugmem_wgeti,
+	ABFLAG_RAM | ABFLAG_THREADSAFE | ABFLAG_CACHE_ENABLE_ALL, 0, 0
 };
 
 addrbank a3000lmem_bank = {
@@ -2069,6 +2148,19 @@ static void allocate_memory (void)
 			need_hardreset = true;
 		}
 	}
+	if (debugmem_bank.reserved_size != currprefs.debugmem_size) {
+		mapped_free(&debugmem_bank);
+
+		debugmem_bank.reserved_size = currprefs.debugmem_size;
+		debugmem_bank.mask = debugmem_bank.reserved_size - 1;
+		debugmem_bank.start = currprefs.debugmem_start;
+		if (debugmem_bank.reserved_size) {
+			if (!mapped_malloc(&debugmem_bank)) {
+				write_log(_T("Out of memory for debugger memory.\n"));
+				debugmem_bank.reserved_size = 0;
+			}
+		}
+	}
 	if (mem25bit_bank.allocated != currprefs.mem25bit_size) {
 		mapped_free(&mem25bit_bank);
 
@@ -2556,6 +2648,8 @@ void memory_reset (void)
 	if (cardmem_bank.baseaddr)
 		map_banks (&cardmem_bank, cardmem_bank.start >> 16, cardmem_bank.allocated >> 16, 0);
 #endif
+	if (debugmem_bank.baseaddr)
+		map_banks(&debugmem_bank, debugmem_bank.start >> 16, debugmem_bank.allocated_size >> 16, 0);
 	cpuboard_map();
 	map_banks_set(&kickmem_bank, 0xF8, 8, 0);
 	if (currprefs.maprom) {

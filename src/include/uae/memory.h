@@ -75,13 +75,34 @@ extern uaecptr rtarea_base;
 
 extern uae_u8* baseaddr[];
 
+#define CACHE_ENABLE_DATA 0x01
+#define CACHE_ENABLE_DATA_BURST 0x02
+#define CACHE_ENABLE_COPYBACK 0x020
+#define CACHE_ENABLE_INS 0x80
+#define CACHE_ENABLE_INS_BURST 0x40
+#define CACHE_ENABLE_BOTH (CACHE_ENABLE_DATA | CACHE_ENABLE_INS)
+#define CACHE_ENABLE_ALL (CACHE_ENABLE_BOTH | CACHE_ENABLE_INS_BURST | CACHE_ENABLE_DATA_BURST)
+#define CACHE_DISABLE_ALLOCATE 0x08
+#define CACHE_DISABLE_MMU 0x10
+extern uae_u8 ce_banktype[65536], ce_cachable[65536];
+
+#define ABFLAG_CACHE_SHIFT 16
 enum
 {
 	ABFLAG_UNK = 0, ABFLAG_RAM = 1, ABFLAG_ROM = 2, ABFLAG_ROMIN = 4, ABFLAG_IO = 8,
 	ABFLAG_NONE = 16, ABFLAG_SAFE = 32, ABFLAG_INDIRECT = 64, ABFLAG_NOALLOC = 128,
-	ABFLAG_RTG = 256, ABFLAG_THREADSAFE = 512, ABFLAG_DIRECTMAP = 1024,
-	ABFLAG_CHIPRAM = 2048, ABFLAG_CIA = 4096, ABFLAG_PPCIOSPACE = 8192
+	ABFLAG_RTG = 256, ABFLAG_THREADSAFE = 512, ABFLAG_DIRECTMAP = 1024, ABFLAG_ALLOCINDIRECT = 2048,
+	ABFLAG_CHIPRAM = 4096, ABFLAG_CIA = 8192, ABFLAG_PPCIOSPACE = 16384,
+	ABFLAG_MAPPED = 32768,
+	ABFLAG_CACHE_ENABLE_DATA = CACHE_ENABLE_DATA << ABFLAG_CACHE_SHIFT,
+	ABFLAG_CACHE_ENABLE_DATA_BURST = CACHE_ENABLE_DATA_BURST << ABFLAG_CACHE_SHIFT,
+	ABFLAG_CACHE_ENABLE_INS = CACHE_ENABLE_INS << ABFLAG_CACHE_SHIFT,
+	ABFLAG_CACHE_ENABLE_INS_BURST = CACHE_ENABLE_INS_BURST << ABFLAG_CACHE_SHIFT,
 };
+
+#define ABFLAG_CACHE_ENABLE_BOTH (ABFLAG_CACHE_ENABLE_DATA | ABFLAG_CACHE_ENABLE_INS)
+#define ABFLAG_CACHE_ENABLE_ALL (ABFLAG_CACHE_ENABLE_BOTH | ABFLAG_CACHE_ENABLE_INS_BURST | ABFLAG_CACHE_ENABLE_DATA_BURST)
+
 typedef struct {
 	/* These ones should be self-explanatory... */
 	mem_get_func lget, wget, bget;
@@ -112,6 +133,10 @@ typedef struct {
 	uae_u32 startmask;
 	uae_u32 start;
 	uae_u32 allocated;
+		// if RAM: size of allocated RAM. Zero if failed.
+	uae_u32 allocated_size;
+	// size of bank (if IO or before RAM allocation)
+	uae_u32 reserved_size;
 } addrbank;
 
 #define MEMORY_MIN_SUBBANK 1024
@@ -131,6 +156,26 @@ struct addrbank_sub
 #define CE_MEMBANK_FAST16 4
 extern uae_u8 ce_banktype[65536], ce_cachable[65536];
 
+#define MEMORY_LGETI(name) \
+static uae_u32 REGPARAM3 name ## _lgeti (uaecptr) REGPARAM; \
+static uae_u32 REGPARAM2 name ## _lgeti (uaecptr addr) \
+{ \
+	uae_u8 *m; \
+	addr -= name ## _bank.start & name ## _bank.mask; \
+	addr &= name ## _bank.mask; \
+	m = name ## _bank.baseaddr + addr; \
+	return do_get_mem_long ((uae_u32 *)m); \
+}
+#define MEMORY_WGETI(name) \
+static uae_u32 REGPARAM3 name ## _wgeti (uaecptr) REGPARAM; \
+static uae_u32 REGPARAM2 name ## _wgeti (uaecptr addr) \
+{ \
+	uae_u8 *m; \
+	addr -= name ## _bank.start & name ## _bank.mask; \
+	addr &= name ## _bank.mask; \
+	m = name ## _bank.baseaddr + addr; \
+	return do_get_mem_word ((uae_u16 *)m); \
+}
 #define MEMORY_LGET(name) \
 static uae_u32 REGPARAM3 name ## _lget (uaecptr) REGPARAM; \
 static uae_u32 REGPARAM2 name ## _lget (uaecptr addr) \
@@ -266,6 +311,7 @@ extern addrbank z3fastmem_bank;
 extern addrbank z3fastmem2_bank;
 extern addrbank z3chipmem_bank;
 extern addrbank mem25bit_bank;
+extern addrbank debugmem_bank;
 extern addrbank a3000lmem_bank;
 extern addrbank a3000hmem_bank;
 extern addrbank extendedkickmem_bank;
@@ -352,6 +398,7 @@ extern void memory_clear (void);
 extern void free_fastmemory (int);
 extern void set_roms_modified (void);
 extern void reload_roms(void);
+extern void chipmem_setindirect(void);
 
 #define longget(addr) (call_mem_get_func(get_mem_bank(addr).lget, addr))
 #define wordget(addr) (call_mem_get_func(get_mem_bank(addr).wget, addr))
@@ -537,6 +584,42 @@ STATIC_INLINE uae_u8 *get_real_address (uaecptr addr)
 STATIC_INLINE int valid_address (uaecptr addr, uae_u32 size)
 {
 	return get_mem_bank (addr).check(addr, size);
+}
+
+STATIC_INLINE void put_quad_host(void *addr, uae_u64 v)
+{
+	do_put_mem_long((uae_u32*)addr, v >> 32);
+	do_put_mem_long(((uae_u32*)addr) + 1, (uae_u32)v);
+}
+STATIC_INLINE void put_long_host(void *addr, uae_u32 v)
+{
+	do_put_mem_long((uae_u32*)addr, v);
+}
+STATIC_INLINE void put_word_host(void *addr, uae_u16 v)
+{
+	do_put_mem_word((uae_u16*)addr, v);
+}
+STATIC_INLINE void put_byte_host(void *addr, uae_u8 v)
+{
+	*((uae_u8*)addr) = v;
+}
+STATIC_INLINE uae_u64 get_quad_host(void *addr)
+{
+	uae_u64 v = ((uae_u64)do_get_mem_long((uae_u32*)addr)) << 32;
+	v |= do_get_mem_long(((uae_u32*)addr) + 1);
+	return v;
+}
+STATIC_INLINE uae_u32 get_long_host(void *addr)
+{
+	return do_get_mem_long((uae_u32*)addr);
+}
+STATIC_INLINE uae_u16 get_word_host(void *addr)
+{
+	return do_get_mem_word((uae_u16*)addr);
+}
+STATIC_INLINE uae_u32 get_byte_host(void *addr)
+{
+	return *((uae_u8*)addr);
 }
 
 extern int addr_valid (const TCHAR*, uaecptr,uae_u32);
