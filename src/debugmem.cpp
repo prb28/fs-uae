@@ -2689,7 +2689,7 @@ uae_u32 debugmem_chiphit(uaecptr addr, uae_u32 v, int size)
 	}
 	if (debugmem_active && debugmem_mapped) {
 		if (!dbg)
-			m68k_dumpstate(0xffffffff, 0);
+			m68k_dumpstate(NULL, 0xffffffff);
 	}
 	recursive--;
 	return 0xdeadf00d;
@@ -2714,7 +2714,7 @@ bool debugmem_extinvalidmem(uaecptr addr, uae_u32 v, int size)
 		dbg = debugmem_break(9);
 	}
 	if (!dbg)
-		m68k_dumpstate(0xffffffff, 0);
+		m68k_dumpstate(NULL, 0xffffffff);
 	recursive--;
 	return true;
 }
@@ -2758,7 +2758,7 @@ bool debugmem_list_stackframe(bool super)
 		uae_u32 sregs[16];
 		memcpy(sregs, regs.regs, sizeof(uae_u32) * 16);
 		memcpy(regs.regs, sf->regs, sizeof(uae_u32) * 16);
-		m68k_disasm(sf->current_pc, NULL, 2);
+		m68k_disasm(sf->current_pc, NULL, NULL, 2);
 		memcpy(regs.regs, sregs, sizeof(uae_u32) * 16);
 		console_out_f(_T("\n"));
 	}

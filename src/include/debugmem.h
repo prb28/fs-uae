@@ -26,13 +26,13 @@ bool debugmem_isactive(void);
 bool debugger_load_libraries(void);
 void debugger_scan_libraries(void);
 bool debugger_get_library_symbol(uaecptr base, uaecptr addr, TCHAR *out);
-bool debugmem_list_stackframe(bool super);
 bool debugmem_break_stack_pop(void);
 bool debugmem_break_stack_push(void);
-bool debugmem_enable_stackframe(bool enable);
 bool debugmem_illg(uae_u16);
 
 // Stack frame functions
+extern bool debugmem_list_stackframe(bool super);
+extern bool debugmem_enable_stackframe(bool enable);
 extern void branch_stack_push(uaecptr oldpc, uaecptr newpc);
 extern void branch_stack_pop_rts(uaecptr oldpc);
 extern void branch_stack_pop_rte(uaecptr);

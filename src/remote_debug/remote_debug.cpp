@@ -58,10 +58,12 @@
 #include "autoconf.h"
 #include "execlib.h"
 #include "uae.h"
+#include "debugmem.h"
 
 //extern int exception_debugging;
 extern int debugger_active;
-static rconn* s_conn = 0;
+extern bool debugmem_trace;
+static rconn *s_conn = 0;
 
 extern int debug_illegal;
 extern uae_u64 debug_illegal_mask;
@@ -185,6 +187,8 @@ static void remote_debug_init_ (int port, int time_out)
 
 	debug_log("remote debugger active\n");
 
+	debugmem_enable_stackframe(true);
+	debugmem_trace = true;
 	remote_debugging = 1;
 	// if time_out > 0 we wait that number of seconds for a connection to be made. If
 	// none has been done within the given time-frame we just continue
@@ -660,7 +664,7 @@ static int map_68k_exception(int exception) {
 		m68k_setpc (last_exception_pc);
     }
 
-    return sig;
+	return sig;
 }
 
 
@@ -672,6 +676,8 @@ static bool send_exception (bool detailed) {
 	uae_u8 *t = messageBuffer;
 	uae_u8 *buffer = messageBuffer;
 	int sig = 0;
+	debugmem_list_stackframe(true);
+	debugmem_list_stackframe(false);
 	if (regs.spcflags & SPCFLAG_BRK) {
 		// It's a breakpoint
 		debug_log("send breakpoint halt %d\n", regs.spcflags);
@@ -751,7 +757,7 @@ static bool step()
 static bool step_next_instruction () {
 	uaecptr nextpc = 0;
 	uaecptr pc = m68k_getpc ();
-	m68k_disasm (pc, &nextpc, 1);
+	m68k_disasm (pc, &nextpc, 0xffffffff, 1);
 
     activate_debugger ();
 
@@ -892,7 +898,8 @@ static void deactive_debugger () {
 	s_state = Running;
 	//exception_debugging = 0;
 	debugger_active = 0;
-    old_active_debugger = 0;
+	debugger_active = false;
+	old_active_debugger = 0;
 
 	step_cpu = true;
 }

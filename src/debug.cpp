@@ -4580,9 +4580,9 @@ static void find_ea (TCHAR **inptr)
 		if ((addr & 1) == 0 && addr + 6 <= end) {
 			sea = 0xffffffff;
 			dea = 0xffffffff;
-			m68k_disasm_ea (addr, NULL, 1, &sea, &dea);
+			m68k_disasm_ea (addr, NULL, 1, &sea, &dea, 0xffffffff);
 			if (ea == sea || ea == dea) {
-				m68k_disasm (addr, NULL, 1);
+				m68k_disasm (addr, NULL, 0xffffffff, 1);
 				hits++;
 				if (hits > 100) {
 					console_out_f (_T("Too many hits. End addr = %08X\n"), addr);
@@ -4887,7 +4887,7 @@ static bool debug_line (TCHAR *input)
 		case 'r':
 			{
 				if (*inptr == 'c')
-					m68k_dumpcache ();
+					m68k_dumpcache (false);
 				else if (more_params(&inptr))
 					m68k_modify (&inptr);
 				else
@@ -4964,7 +4964,7 @@ static bool debug_line (TCHAR *input)
 						ppc_disasm(daddr, &nxdis, count);
 #endif
 					} else {
-						m68k_disasm (daddr, &nxdis, count);
+						m68k_disasm (daddr, &nxdis, 0xffffffff, count);
 					}
 				}
 			}
@@ -5080,7 +5080,7 @@ static bool debug_line (TCHAR *input)
 							m68k_dumpstate (NULL);
 						} else {
 							console_out_f(_T("%2d "), history[temp].intmask ? history[temp].intmask : (history[temp].s ? -1 : 0));
-							m68k_disasm (history[temp].pc, NULL, 1);
+							m68k_disasm (history[temp].pc, NULL, 0xffffffff, 1);
 						}
 						if (addr && history[temp].pc == addr)
 							break;
@@ -5355,7 +5355,7 @@ void debug (void)
 		}
 		if (trace_same_insn_count > 1)
 			fprintf (logfile, "[ repeated %d times ]\n", trace_same_insn_count);
-		m68k_dumpstate (logfile, &nextpc);
+		m68k_dumpstate (&nextpc, logfile);
 		trace_same_insn_count = 1;
 		memcpy (trace_insn_copy, regs.pc_p, 10);
 		memcpy (&trace_prev_regs, &regs, sizeof regs);
@@ -5522,8 +5522,8 @@ const TCHAR *debuginfo (int mode)
 void mmu_disasm (uaecptr pc, int lines)
 {
 	debug_mmu_mode = regs.s ? 6 : 2;
-	m68k_dumpstate (0xffffffff, NULL);
-	m68k_disasm (pc, NULL, lines);
+	m68k_dumpstate (NULL, 0xffffffff);
+	m68k_disasm (pc, NULL, 0xffffffff, lines);
 }
 
 static int mmu_logging;

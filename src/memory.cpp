@@ -1121,7 +1121,7 @@ uae_u8 *REGPARAM2 default_xlate (uaecptr addr)
 				write_log (_T("Your Amiga program just did something terribly stupid %08X PC=%08X\n"), addr, M68K_GETPC);
 				if (debugging || DEBUG_STUPID) {
 					activate_debugger ();
-					m68k_dumpstate (0);
+					m68k_dumpstate (NULL);
 				}
 				for (i = 0; i < 10; i++) {
 					write_log (_T("%08X "), i >= 5 ? a3 : a2);
