@@ -250,7 +250,7 @@ int rconn_recv (rconn* conn, char* buffer, int length, int flags)
 
     ret = (int)recv(conn->socket, buffer, (size_t)length, flags);
 
-    printf("recv %d\n", ret);
+    debug_log("recv %d\n", ret);
 
     if (ret <= 0)
     {

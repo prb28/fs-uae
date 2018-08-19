@@ -31,11 +31,21 @@ bool debugmem_break_stack_push(void);
 bool debugmem_illg(uae_u16);
 
 // Stack frame functions
+typedef struct debugstackframe
+{
+	uaecptr current_pc;
+	uaecptr branch_pc;
+	uaecptr next_pc;
+	uaecptr stack;
+	uae_u32 regs[16];
+	uae_u16 sr;
+};
 extern bool debugmem_list_stackframe(bool super);
 extern bool debugmem_enable_stackframe(bool enable);
 extern void branch_stack_push(uaecptr oldpc, uaecptr newpc);
 extern void branch_stack_pop_rts(uaecptr oldpc);
 extern void branch_stack_pop_rte(uaecptr);
+extern struct debugstackframe *find_traceframe(bool super, int num, int *tfnump);
 
 extern uae_u32 debugmem_chiplimit;
 extern uae_u32 debugmem_chiphit(uaecptr addr, uae_u32 v, int size);

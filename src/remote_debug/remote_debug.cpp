@@ -80,8 +80,11 @@ extern int debug_dma;
 #define GDB_SIGNAL_BUS 10			// Bus error
 #define GDB_SIGNAL_SEGV 11			// Segmentation fault
 
+#define DEFAULT_TRACEFRAME -1		// Traceframe default index
+
 static char s_exe_to_run[4096];
 
+static bool debug_log_enabled = false; // system env configuration : FS_DEBUG_REMOTE_PROTOCOL=1
 static int old_active_debugger = 0;
 
 typedef struct dma_info {
@@ -125,10 +128,13 @@ static int s_lastSize = 0;
 static unsigned int s_socket_update_count = 0;
 static int last_exception = 0;
 static bool last_exception_sent = true;
+static bool exception_send_pending = false;
+static bool processing_message = false;
 static uae_u32 last_exception_pc = 0;
 
 bool need_ack = true;
 static bool vRunCalled = false;
+int current_traceframe = DEFAULT_TRACEFRAME;
 
 // Declaration of the update_connection function
 static void update_connection(void);
@@ -153,19 +159,66 @@ int is_quiting() { return quit_program; }
 
 #endif
 
-//#define DEBUG_LOG
-
+// Debug logging
+// system env configuration : FS_DEBUG_REMOTE_PROTOCOL=1
 static void debug_log(const char *format, ...)
 {
-	char buffer[8192];
-	va_list args;
-	va_start(args, format);
-	vsprintf(buffer, format, args);
+	if (debug_log_enabled)
+	{
+		char buffer[8192];
+		va_list args;
+		va_start(args, format);
+		vsprintf(buffer, format, args);
 #ifdef _WIN32
-	OutputDebugStringA(buffer);
+		OutputDebugStringA(buffer);
 #else
-	printf("%s\n", buffer);
+		printf("%s\n", buffer);
 #endif
+	}
+}
+
+// Return non-zero if the start of STRING matches PATTERN, zero
+//   otherwise.
+static inline int startswith (const char *string, const char *pattern)
+{
+  return strncmp (string, pattern, strlen (pattern)) == 0;
+}
+
+// Test if it is a hex value
+static bool ishex(int ch, int *val)
+{
+	if ((ch >= 'a') && (ch <= 'f'))
+	{
+		*val = ch - 'a' + 10;
+		return true;
+	}
+	if ((ch >= 'A') && (ch <= 'F'))
+	{
+		*val = ch - 'A' + 10;
+		return true;
+	}
+	if ((ch >= '0') && (ch <= '9'))
+	{
+		*val = ch - '0';
+		return true;
+	}
+	return false;
+}
+
+// Reads a hex value from the buffer
+const char *unpack_varlen_hex(const char *buff, uae_u32 *result)
+{
+	int nibble;
+	uae_u32 retval = 0;
+
+	while (ishex(*buff, &nibble))
+	{
+		buff++;
+		retval = retval << 4;
+		retval |= nibble & 0x0f;
+	}
+	*result = retval;
+	return buff;
 }
 
 //
@@ -179,6 +232,8 @@ static void remote_debug_init_ (int port, int time_out)
 {
 	if (s_conn || time_out < 0)
 		return;
+
+	debug_log_enabled = getenv("FS_DEBUG_REMOTE_PROTOCOL") && (getenv("FS_DEBUG_REMOTE_PROTOCOL")[0] == '1');
 
 	debug_log("creating connection...\n");
 
@@ -276,7 +331,7 @@ static bool reply_ok()
 	return rconn_send (s_conn, s_ok, 6, 0) == 6;
 }
 
-static uae_u8* write_reg_32 (unsigned char* dest, uae_u32 v)
+static uae_u8* write_u32 (unsigned char* dest, uae_u32 v)
 {
 	uae_u8 c0 = (v >> 24) & 0xff;
 	uae_u8 c1 = (v >> 16) & 0xff;
@@ -324,7 +379,7 @@ static uae_u8* write_string (unsigned char* dest, const char* name)
 }
 
 
-static uae_u8* write_reg_double (uae_u8* dest, double v)
+static uae_u8* write_double (uae_u8* dest, double v)
 {
     union
     {
@@ -364,7 +419,7 @@ static bool send_packet_in_place (unsigned char* t, int length)
     t[length + 4] = 0;
 
     //debug_log("[<----] <inplace>\n");
-    //debug_log("[<----] %s\n", t);
+    debug_log("[<----] %s\n", t);
 
     return rconn_send(s_conn, t, length + 4, 0) == length + 4;
 }
@@ -404,31 +459,54 @@ static bool send_registers (void)
     uae_u32 temp;
 
     *buffer++ = '$';
-
-    for (int i = 0; i < 8; ++i)
-	    buffer = write_reg_32 (buffer, m68k_dreg (regs, i));
-
-    for (int i = 0; i < 8; ++i)
-	    buffer = write_reg_32 (buffer, m68k_areg (regs, i));
-
-    buffer = write_reg_32 (buffer, regs.sr);
-    buffer = write_reg_32 (buffer, m68k_getpc ());
-
-    debug_log("current pc %08x\n", m68k_getpc ());
-
-#ifdef FPUEMU
-	/*
-	if (currprefs.fpu_model)
+	if (current_traceframe < 0) 
 	{
 		for (int i = 0; i < 8; ++i)
-			buffer = write_reg_double (buffer, regs.fp[i].fp);
+			buffer = write_u32 (buffer, m68k_dreg (regs, i));
 
-		buffer = write_reg_32 (buffer, regs.fpcr);
-		buffer = write_reg_32 (buffer, regs.fpsr);
-		buffer = write_reg_32 (buffer, regs.fpiar);
-	}
-	*/
+		for (int i = 0; i < 8; ++i)
+			buffer = write_u32 (buffer, m68k_areg (regs, i));
+
+		buffer = write_u32 (buffer, regs.sr);
+		buffer = write_u32 (buffer, m68k_getpc ());
+
+		debug_log("current pc %08x\n", m68k_getpc ());
+
+#ifdef FPUEMU
+		/*
+		if (currprefs.fpu_model)
+		{
+			for (int i = 0; i < 8; ++i)
+				buffer = write_double (buffer, regs.fp[i].fp);
+
+			buffer = write_u32 (buffer, regs.fpcr);
+			buffer = write_u32 (buffer, regs.fpsr);
+			buffer = write_u32 (buffer, regs.fpiar);
+		}
+		*/
 #endif
+	}
+	else
+	{
+		// Retrive the curren frame
+		int tfnum;
+		debugstackframe *tframe = find_traceframe(false, current_traceframe, &tfnum);
+		if (tframe)
+		{
+			for (int i = 0; i < 16; ++i)
+				buffer = write_u32 (buffer, tframe->regs[i]);
+
+			buffer = write_u32 (buffer, tframe->sr);
+			buffer = write_u32 (buffer, tframe->current_pc);
+		}
+		else
+		{
+			debug_log("The frame id '%d' is invalid\n", current_traceframe);
+			send_packet_string (ERROR_INVALID_FRAME_ID);
+			return false;
+		}
+		
+	}
 
     debug_log("sending registers back\n");
 
@@ -529,33 +607,106 @@ bool set_memory (char* packet, int packet_length)
 bool set_register (char* packet, int packet_length)
 {
     char name[256];
-	char regType;
 	int registerNumber;
 	uaecptr value;
 
-	if (sscanf (packet, "%c%d=%x#", &regType, &registerNumber, &value) != 3) {
+	if (sscanf (packet, "%x=%x#", &registerNumber, &value) != 2) {
 		debug_log("failed to parse set_register packet: %s\n", packet);
 		send_packet_string (ERROR_SET_REGISTER_PARSE);
 		return false;
     }
 
-	if ((registerNumber < 0) || (registerNumber > 7)) {
+	if ((registerNumber < 0) || (registerNumber > REGISTER_LAST_VALID_INDEX)) {
 		debug_log("The register name '%s' is invalid\n", name);
-		send_packet_string (ERROR_SET_REGISTER_PARSE_NAME_INVALID);
+		send_packet_string (ERROR_UNKOWN_REGISTER);
 		return false;
 	}
-
-	if (regType == 'd') {
+	if ((registerNumber <= REGISTER_D0_INDEX+7) && (registerNumber >= REGISTER_D0_INDEX)) {
 		m68k_dreg (regs, registerNumber) = value;
-	} else if (regType == 'a') {
+	} else 	if ((registerNumber <= REGISTER_A0_INDEX+7) && (registerNumber >= REGISTER_A0_INDEX)) {
 		m68k_areg (regs, registerNumber) = value;
 	} else {
-		debug_log("The register name '%s' is invalid\n", name);
-		send_packet_string (ERROR_SET_REGISTER_PARSE_NAME_INVALID);
+		debug_log("The register name '%s' not supported\n", name);
+		send_packet_string (ERROR_SET_REGISTER_NON_SUPPORTED);
 		return false;
 	}
 
     return reply_ok ();
+}
+
+bool get_register (char* packet, int packet_length)
+{
+	int registerNumber;
+    uae_u8 messageBuffer[20] = { 0 };
+    uae_u8* buffer = messageBuffer;
+	*buffer++ = '$';
+
+	if (sscanf(packet, "%x#", &registerNumber) != 1)
+	{
+		debug_log("failed to parse get_register packet: %s\n", packet);
+		send_packet_string (ERROR_GET_REGISTER_PARSE);
+		return false;
+    }
+
+	if (current_traceframe < 0) 
+	{
+		if (registerNumber == REGISTER_PC_INDEX)
+		{
+			buffer = write_u32 (buffer, m68k_getpc());
+		}
+		else if (registerNumber == REGISTER_SR_INDEX)
+		{
+			buffer = write_u32 (buffer, regs.sr);
+		}
+		else if ((registerNumber <= REGISTER_D0_INDEX+7) && (registerNumber >= REGISTER_D0_INDEX))
+		{
+			buffer = write_u32 (buffer, m68k_dreg (regs, registerNumber - REGISTER_D0_INDEX));
+		}
+		else 	if ((registerNumber <= REGISTER_A0_INDEX+7) && (registerNumber >= REGISTER_A0_INDEX))
+		{
+			buffer = write_u32 (buffer, m68k_areg (regs, registerNumber - REGISTER_A0_INDEX));
+		} else {
+			debug_log("The register number '%d' is invalid\n", registerNumber);
+			send_packet_string (ERROR_UNKOWN_REGISTER);
+			return false;
+		}
+	}
+	else
+	{
+		// Retrive the curren frame
+		int tfnum;
+		debugstackframe *tframe = find_traceframe(false, current_traceframe, &tfnum);
+		if (tframe)
+		{
+			if (registerNumber == REGISTER_PC_INDEX)
+			{
+				buffer = write_u32 (buffer, tframe->current_pc);
+			}
+			else if (registerNumber == REGISTER_SR_INDEX)
+			{
+				buffer = write_u32 (buffer, tframe->sr);
+			}
+			else if ((registerNumber <= REGISTER_D0_INDEX+7) && (registerNumber >= REGISTER_D0_INDEX))
+			{
+				buffer = write_u32(buffer, tframe->regs[registerNumber]);
+			}
+			else 	if ((registerNumber <= REGISTER_A0_INDEX+7) && (registerNumber >= REGISTER_A0_INDEX))
+			{
+				buffer = write_u32(buffer, tframe->regs[registerNumber]);
+			} else {
+				debug_log("The register number '%d' is invalid\n", registerNumber);
+				send_packet_string (ERROR_UNKOWN_REGISTER);
+				return false;
+			}
+		}
+		else
+		{
+			debug_log("The frame id '%d' is invalid\n", current_traceframe);
+			send_packet_string (ERROR_INVALID_FRAME_ID);
+			return false;
+		}
+	}
+	return send_packet_in_place(messageBuffer, 8);
 }
 
 
@@ -669,6 +820,11 @@ static int map_68k_exception(int exception) {
 
 
 static bool send_exception (bool detailed) {
+	if (processing_message) {
+		// send is delayed
+		exception_send_pending = true;
+		return true;
+	}
 	// this function will just exit if already connected
 	rconn_update_listner(s_conn);
 
@@ -676,8 +832,6 @@ static bool send_exception (bool detailed) {
 	uae_u8 *t = messageBuffer;
 	uae_u8 *buffer = messageBuffer;
 	int sig = 0;
-	debugmem_list_stackframe(true);
-	debugmem_list_stackframe(false);
 	if (regs.spcflags & SPCFLAG_BRK) {
 		// It's a breakpoint
 		debug_log("send breakpoint halt %d\n", regs.spcflags);
@@ -695,32 +849,33 @@ static bool send_exception (bool detailed) {
 		*buffer++ = 'S';
 	}
 	buffer = write_u8(buffer, sig);
-	*buffer++ = ' ';
 
-	int regId = 0xd0;
-	for (int i = 0; i < 8; ++i) {
-		buffer = write_u8(buffer, regId++);
+	if (detailed)
+	{
+		int regId = REGISTER_D0_INDEX;
+		for (int i = 0; i < 8; ++i) {
+			buffer = write_u8(buffer, regId++);
+			*buffer++ = ':';
+			buffer = write_u32 (buffer, m68k_dreg (regs, i));
+			*buffer++ = ';';
+		}
+
+		regId = REGISTER_A0_INDEX;
+		for (int i = 0; i < 8; ++i) {
+			buffer = write_u8(buffer, regId++);
+			*buffer++ = ':';
+			buffer = write_u32 (buffer, m68k_areg (regs, i));
+			*buffer++ = ';';
+		}
+
+		buffer = write_u8(buffer, REGISTER_SR_INDEX);
 		*buffer++ = ':';
-		buffer = write_reg_32 (buffer, m68k_dreg (regs, i));
+		buffer = write_u32 (buffer, regs.sr);
 		*buffer++ = ';';
-	}
-
-	regId = 0xa0;
-	for (int i = 0; i < 8; ++i) {
-		buffer = write_u8(buffer, regId++);
+		buffer = write_u8(buffer, REGISTER_PC_INDEX);
 		*buffer++ = ':';
-	    buffer = write_reg_32 (buffer, m68k_areg (regs, i));
-		*buffer++ = ';';
+		buffer = write_u32 (buffer, m68k_getpc ());
 	}
-
-	buffer = write_u8(buffer, 1);
-	*buffer++ = ':';
-    buffer = write_reg_32 (buffer, regs.sr);
-	*buffer++ = ';';
-	buffer = write_u8(buffer, 0);
-	*buffer++ = ':';
-    buffer = write_reg_32 (buffer, m68k_getpc ());
-
     return send_packet_in_place(t, (int)((uintptr_t)buffer - (uintptr_t)t) - 1);
 }
 
@@ -739,7 +894,8 @@ void remote_debug_check_exception_ (void) {
 
 static bool step()
 {
-	set_special (SPCFLAG_BRK);
+	current_traceframe = DEFAULT_TRACEFRAME;
+	set_special(SPCFLAG_BRK);
 	step_cpu = true;
 	did_step_cpu = true;
 
@@ -755,6 +911,7 @@ static bool step()
 }
 
 static bool step_next_instruction () {
+	current_traceframe = DEFAULT_TRACEFRAME;
 	uaecptr nextpc = 0;
 	uaecptr pc = m68k_getpc ();
 	m68k_disasm (pc, &nextpc, 0xffffffff, 1);
@@ -838,7 +995,7 @@ static bool handle_multi_letter_packet (char* packet, int length)
 		return handle_vrun (packet + 5);
 	} else if (!strcmp(packet, "vCtrlC")) {
 		set_special (SPCFLAG_BRK);
-		send_exception (true);
+		send_exception (false);
 		debug_log("switching to tracing\n");
 		s_state = Tracing;
 		return true;
@@ -847,6 +1004,53 @@ static bool handle_multi_letter_packet (char* packet, int length)
 	}
 
 	return false;
+}
+
+static bool handle_qtframe_packet(char *packet)
+{
+	uae_u32 frame, pc, lo, hi, num;
+	int tfnum, tpnum, tfnumFound;
+	struct debugstackframe *tframe;
+	uae_u8 messageBuffer[50] = { 0 };
+	uae_u8 *buffer = messageBuffer;
+	uae_u8 *t = messageBuffer;
+	*buffer++ = '$';
+
+	packet += strlen("QTFrame:");
+
+	if (*packet == '-')
+	{
+		// Must be '-1' : asking to reset the current frame
+		tfnum = -1;
+	}
+	else
+	{
+		unpack_varlen_hex(packet, &frame);
+		tfnum = (int)frame;
+	}
+	debug_log("Want to look at traceframe %d", tfnum);
+	tframe = find_traceframe(false, tfnum, &tfnumFound);
+	if (tframe)
+	{
+		current_traceframe = tfnum;
+		*buffer++ = 'F';
+		if (tfnumFound <= 0)
+		{
+			*buffer++ = '-';
+			*buffer++ = '1';
+		}
+		else 
+		{
+			buffer = write_u32 (buffer, tfnumFound);
+		}
+	}
+	else
+	{
+		*buffer++ = 'F';
+		*buffer++ = '-';
+		*buffer++ = '1';
+	}
+    return send_packet_in_place(t, (int)((uintptr_t)buffer - (uintptr_t)t) - 1);
 }
 
 static bool handle_query_packet(char* packet, int length)
@@ -876,7 +1080,13 @@ static bool handle_query_packet(char* packet, int length)
 	else if (!strcmp (packet, "qSupported")) {
 		debug_log("handle_query_packet %d\n", __LINE__);
 		send_packet_string ("QStartNoAckMode+");
-	} else {
+	}
+	else if (!strcmp (packet, "QTFrame")) {
+		debug_log("handle_qtframe_packet %d\n", __LINE__);
+		handle_qtframe_packet(packet);
+	}
+	else
+	{
 		debug_log("handle_query_packet %d\n", __LINE__);
 		send_packet_string ("");
 	}
@@ -894,13 +1104,11 @@ static bool handle_thread ()
 }
 
 static void deactive_debugger () {
-	set_special (SPCFLAG_BRK);
 	s_state = Running;
-	//exception_debugging = 0;
 	debugger_active = 0;
-	debugger_active = false;
 	old_active_debugger = 0;
-
+	debugging = 0;
+	exception_debugging = 0;
 	step_cpu = true;
 }
 
@@ -1146,6 +1354,7 @@ static bool handle_packet(char* packet, int length)
 		case 'k' : return kill_program ();
 		case 'm' : return send_memory (packet + 1);
 		case 'M' : return set_memory (packet + 1, length - 1);
+		case 'p' : return get_register (packet + 1, length - 1);
 		case 'P' : return set_register (packet + 1, length - 1);
 		case 'c' : return continue_exec (packet + 1);
 		case 'Z' : return set_breakpoint (packet + 1, 1);
@@ -1228,10 +1437,19 @@ static void update_connection (void)
 
 		int size = rconn_recv(s_conn, temp, sizeof(temp), 0);
 
+		processing_message = true;
+
 		debug_log("[---->] %s\n", temp);
 
 		if (size > 0)
 			parse_packet(temp, size);
+
+		processing_message = false;
+
+		if (exception_send_pending) {
+			send_exception(true);
+			exception_send_pending = false;
+		}
 	}
 }
 
@@ -1257,7 +1475,7 @@ static void remote_debug_ (void)
 			set_special (SPCFLAG_BRK);
 
 			if (s_skip_to_pc == pc) {
-				send_exception (true);
+				send_exception (false);
 				s_state = Tracing;
 				s_skip_to_pc = 0xffffffff;
 			}
@@ -1278,7 +1496,7 @@ static void remote_debug_ (void)
 			if (s_breakpoints[i].address == pc)
 			{
 				//activate_debugger ();
-				send_exception (true);
+				send_exception (false);
 				debug_log("switching to tracing\n");
 				s_state = Tracing;
 				break;
@@ -1329,7 +1547,7 @@ static void remote_debug_ (void)
 		{
 			if (did_step_cpu) {
 				debug_log("did step cpu\n");
-				send_exception (true);
+				send_exception (false);
 				did_step_cpu = false;
 			}
 
@@ -1458,8 +1676,8 @@ void remote_debug_start_executable (struct TrapContext *context)
 		s_segment_info[s_segment_count].address = addr;
 		s_segment_info[s_segment_count].size = size;
 
-		write_reg_32(addrStrTemp, addr);
-		write_reg_32(sizeStrTemp, size);
+		write_u32(addrStrTemp, addr);
+		write_u32(sizeStrTemp, size);
 		sprintf(temp, ";%s;%s", addrStrTemp, sizeStrTemp);
 		strcat(buffer, temp);
 
