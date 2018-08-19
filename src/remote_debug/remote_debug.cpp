@@ -1120,10 +1120,10 @@ static bool handle_thread ()
 }
 
 static void deactive_debugger () {
+	set_special (SPCFLAG_BRK);
 	s_state = Running;
 	debugger_active = 0;
 	old_active_debugger = 0;
-	debugging = 0;
 	exception_debugging = 0;
 	step_cpu = true;
 }
@@ -1780,7 +1780,6 @@ void remote_debug_end_executable (struct TrapContext *context)
 
 extern "C"
 {
-
 	void remote_debug_init(int port, int time_out) { return remote_debug_init_(port, time_out); }
 	void remote_debug(void) { remote_debug_(); }
 	void remote_debug_update(void) { remote_debug_update_(); }
