@@ -52,6 +52,11 @@ void remote_debug_check_exception();
 }
 #endif
 
+// Config options
+#define OPTION_REMOTE_DEBUGGER_START_TIMER "remote_debugger"
+#define OPTION_REMOTE_DEBUGGER_DEFAULT_PORT "remote_debugger_port"
+#define OPTION_REMOTE_DEBUGGER_LOG "remote_debugger_log"
+
 // Default server socket port
 #define REMOTE_DEBUGGER_DEFAULT_PORT 6860
 
