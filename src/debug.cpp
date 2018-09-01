@@ -54,6 +54,17 @@
 #undef _WIN32
 #endif
 
+#define TRACE_SKIP_INS 1
+#define TRACE_MATCH_PC 2
+#define TRACE_MATCH_INS 3
+#define TRACE_RANGE_PC 4
+#define TRACE_SKIP_LINE 5
+#define TRACE_CHECKONLY 10
+
+static int trace_mode;
+static uae_u32 trace_param1;
+static uae_u32 trace_param2;
+
 int debugger_active;
 static uaecptr skipaddr_start, skipaddr_end;
 static int skipaddr_doskip;
@@ -73,6 +84,7 @@ int debug_illegal = 0;
 uae_u64 debug_illegal_mask;
 static int debug_mmu_mode;
 static bool break_if_enforcer;
+static uaecptr debug_pc;
 
 static uaecptr processptr;
 static uae_char *processname;
@@ -94,13 +106,37 @@ void deactivate_debugger (void)
 
 void activate_debugger (void)
 {
-	do_skip = 0;
-	if (debugger_active)
-		return;
-	debugger_active = 1;
-	set_special (SPCFLAG_BRK);
-	debugging = 1;
-	mmu_triggered = 0;
+#ifdef REMOTE_DEBUGGER
+	if (remote_debugging) {
+		remote_debug_check_exception ();
+	}
+#else
+	if (notinrom()) {
+#endif
+		do_skip = 0;
+		if (debugger_active)
+			return;
+		debugger_active = 1;
+		set_special (SPCFLAG_BRK);
+		debugging = 1;
+		mmu_triggered = 0;
+#ifndef REMOTE_DEBUGGER
+	}
+#endif
+}
+
+void activate_debugger_new(void)
+{
+	activate_debugger();
+	debug_pc = M68K_GETPC;
+}
+
+void activate_debugger_new_pc(uaecptr pc, int len)
+{
+	activate_debugger();
+	trace_mode = TRACE_RANGE_PC;
+	trace_param1 = pc;
+	trace_param2 = pc + len;
 }
 
 bool debug_enforcer(void)
@@ -4544,9 +4580,9 @@ static void find_ea (TCHAR **inptr)
 		if ((addr & 1) == 0 && addr + 6 <= end) {
 			sea = 0xffffffff;
 			dea = 0xffffffff;
-			m68k_disasm_ea (addr, NULL, 1, &sea, &dea);
+			m68k_disasm_ea (addr, NULL, 1, &sea, &dea, 0xffffffff);
 			if (ea == sea || ea == dea) {
-				m68k_disasm (addr, NULL, 1);
+				m68k_disasm (addr, NULL, 0xffffffff, 1);
 				hits++;
 				if (hits > 100) {
 					console_out_f (_T("Too many hits. End addr = %08X\n"), addr);
@@ -4851,7 +4887,7 @@ static bool debug_line (TCHAR *input)
 		case 'r':
 			{
 				if (*inptr == 'c')
-					m68k_dumpcache ();
+					m68k_dumpcache (false);
 				else if (more_params(&inptr))
 					m68k_modify (&inptr);
 				else
@@ -4928,7 +4964,7 @@ static bool debug_line (TCHAR *input)
 						ppc_disasm(daddr, &nxdis, count);
 #endif
 					} else {
-						m68k_disasm (daddr, &nxdis, count);
+						m68k_disasm (daddr, &nxdis, 0xffffffff, count);
 					}
 				}
 			}
@@ -5044,7 +5080,7 @@ static bool debug_line (TCHAR *input)
 							m68k_dumpstate (NULL);
 						} else {
 							console_out_f(_T("%2d "), history[temp].intmask ? history[temp].intmask : (history[temp].s ? -1 : 0));
-							m68k_disasm (history[temp].pc, NULL, 1);
+							m68k_disasm (history[temp].pc, NULL, 0xffffffff, 1);
 						}
 						if (addr && history[temp].pc == addr)
 							break;
@@ -5319,7 +5355,7 @@ void debug (void)
 		}
 		if (trace_same_insn_count > 1)
 			fprintf (logfile, "[ repeated %d times ]\n", trace_same_insn_count);
-		m68k_dumpstate (logfile, &nextpc);
+		m68k_dumpstate (&nextpc, logfile);
 		trace_same_insn_count = 1;
 		memcpy (trace_insn_copy, regs.pc_p, 10);
 		memcpy (&trace_prev_regs, &regs, sizeof regs);
@@ -5486,8 +5522,8 @@ const TCHAR *debuginfo (int mode)
 void mmu_disasm (uaecptr pc, int lines)
 {
 	debug_mmu_mode = regs.s ? 6 : 2;
-	m68k_dumpstate (0xffffffff, NULL);
-	m68k_disasm (pc, NULL, lines);
+	m68k_dumpstate (NULL, 0xffffffff);
+	m68k_disasm (pc, NULL, 0xffffffff, lines);
 }
 
 static int mmu_logging;

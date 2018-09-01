@@ -365,6 +365,9 @@ static void event_handler(int line)
          * connected to the server (for net play game), but aborted connection
          * before game started. */
         fs_uae_reconfigure_input_ports_amiga();
+        /* Also configure input ports now (which also makes sure keyboard
+         * etc. is initialized) to ensure it is configured at least once. */
+        fs_uae_reconfigure_input_ports_host();
     }
 
     if (fs_emu_is_quitting()) {
@@ -734,7 +737,7 @@ static void log_to_libfsemu(const char *message)
         ignore = fs_config_false(OPTION_UAELOG);
     }
     if (!ignore) {
-        //fs_log_string(message);
+        fs_log_string(message);
     }
 }
 
@@ -1298,14 +1301,18 @@ int main(int argc, char *argv[])
 #endif
 
 #ifdef REMOTE_DEBUGGER
-	int remote_debugger = fs_config_get_int("remote_debugger");
+	int remote_debugger = fs_config_get_int(OPTION_REMOTE_DEBUGGER_START_TIMER);
+    int remote_debugger_port = fs_config_get_int(OPTION_REMOTE_DEBUGGER_DEFAULT_PORT);
 
 	if (remote_debugger != FS_CONFIG_NONE) {
 		// -1 as 0 means no time-out but the user will send in 1 to enable the remote debugger to
 		// make sure this config setting works similar to other settings. Values > 1 will result
 		// in the code waiting for x number of seconds for the remote debugger to connect.
 		// If the value ends up being negative no setup will be done.
-		remote_debug_init(remote_debugger - 1);
+    	if (remote_debugger_port == FS_CONFIG_NONE) {
+            remote_debugger_port = REMOTE_DEBUGGER_DEFAULT_PORT;
+        }
+        remote_debug_init(remote_debugger_port, remote_debugger - 1);
 	}
 #endif
 

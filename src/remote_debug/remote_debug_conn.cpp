@@ -10,11 +10,13 @@
 #include <Ws2tcpip.h>
 #endif
 
+#if defined(WINDOWS)
+#include <ws2tcpip.h>
+#endif
 #if !defined(_WIN32)
 #include <sys/types.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
-#include <unistd.h>
 #include <netinet/in.h>
 #include <netdb.h>
 #include <arpa/inet.h>
@@ -42,8 +44,8 @@ typedef struct rconn
 {
     enum ConnectionType type;
 
-    int server_socket;     // used when having a listener socket
-    int socket;
+    SOCKET server_socket;     // used when having a listener socket
+    SOCKET socket;
 
 } rconn;
 
@@ -248,7 +250,7 @@ int rconn_recv (rconn* conn, char* buffer, int length, int flags)
 
     ret = (int)recv(conn->socket, buffer, (size_t)length, flags);
 
-    printf("recv %d\n", ret);
+    debug_log("recv %d\n", ret);
 
     if (ret <= 0)
     {

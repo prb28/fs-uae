@@ -1,5 +1,21 @@
+Version 2.9.8dev:
+
+* Added Build-Conflicts: libroar-dev to fix building on OBS.
+* Added sharp-bilinear-simple.shader [rsn8887].
+* New options window_hidden, window_minimized [cnvogelg].
+* Removed GLee from source.
+* Fixed JIT direct access on modern Linux distributions.
+* Changed default sync method on Windows to swap-finish.
+* Updated bezel.
+* New option: frame_time (can be used to limit emulation time before vsync).
+* Compatibility updates for a couple of shaders [guest.r].
+* Imported updated translations from crowdin.com.
+
 Version 2.9.7dev:
 
+* Support building with latest version of MSYS2.
+* Renamed option frame to bezel.
+* New option: force_aspect.
 * Added shaders compiled/ported/written by guest.r.
 
 Version 2.9.6dev:

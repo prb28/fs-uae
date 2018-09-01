@@ -364,6 +364,9 @@ struct uae_prefs {
 	bool socket_emu;
 
 	bool start_debugger;
+	int debugging_features;
+	TCHAR debugging_options[MAX_DPATH];
+
 	bool start_gui;
 
 	KbdLang keyboard_lang;
@@ -586,6 +589,8 @@ struct uae_prefs {
 	uae_u32 mbresmem_low_size;
 	uae_u32 mbresmem_high_size;
 	uae_u32 mem25bit_size;
+	uae_u32 debugmem_start;
+	uae_u32 debugmem_size;
 	uae_u32 rtgmem_size;
 	int cpuboard_type;
 	int cpuboard_subtype;
@@ -761,6 +766,7 @@ extern int cfgfile_yesno (const TCHAR *option, const TCHAR *value, const TCHAR *
 extern int cfgfile_intval (const TCHAR *option, const TCHAR *value, const TCHAR *name, int *location, int scale);
 extern int cfgfile_strval (const TCHAR *option, const TCHAR *value, const TCHAR *name, int *location, const TCHAR *table[], int more);
 extern int cfgfile_string (const TCHAR *option, const TCHAR *value, const TCHAR *name, TCHAR *location, int maxsz);
+extern TCHAR *cfgfile_option_get(const TCHAR *s, const TCHAR *option);
 extern TCHAR *cfgfile_subst_path (const TCHAR *path, const TCHAR *subst, const TCHAR *file);
 
 extern TCHAR *target_expand_environment (const TCHAR *path);

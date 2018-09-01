@@ -68,9 +68,18 @@ AM_LDFLAGS =
 AM_LDFLAGS += @OS_LDFLAGS@
 
 if JIT
+if FNO_PIE
+AM_CPPFLAGS += -fno-pie
+endif
+if FNO_PIE_CAP
+AM_CPPFLAGS += -fno-PIE
+endif
 if NO_PIE
 AM_LDFLAGS += -no-pie
 endif
+# if WL_TDATA
+# AM_LDFLAGS += -Wl,-Tdata=0x10000000
+# endif
 endif
 
 if STATIC_BUILD
@@ -241,6 +250,7 @@ libuae_a_SOURCES = \
 	src/crc32.cpp \
 	src/custom.cpp \
 	src/debug.cpp \
+	src/debugmem.cpp \
 	src/debuginfo.cpp \
 	src/def_icons.cpp \
 	src/devices.cpp \
@@ -346,6 +356,7 @@ libuae_a_SOURCES = \
 	src/include/crc32.h \
 	src/include/custom.h \
 	src/include/debug.h \
+	src/include/debugmem.h \
 	src/include/devices.h \
 	src/include/disk.h \
 	src/include/diskutil.h \
@@ -783,16 +794,6 @@ AM_CPPFLAGS += -I$(s)/cef
 fs_uae_LDADD += cef/libcef_dll/libcef_dll_wrapper.a -L $(s)/cef/Release -lcef
 endif
 
-if BUILTIN_GLEE
-noinst_LIBRARIES += libglee.a
-AM_CPPFLAGS += -I$(s)/glee
-fs_uae_LDADD += libglee.a
-fs_uae_device_helper_LDADD += libglee.a
-libglee_a_SOURCES = \
-	glee/GLee.c \
-	glee/GLee.h
-endif
-
 if BUILTIN_MANYMOUSE
 noinst_LIBRARIES += libmanymouse.a
 AM_CPPFLAGS += -I$(s)/manymouse
@@ -1202,11 +1203,11 @@ EXTRA_DIST = $(TESTS) $(EXTRA_TESTS) \
 	dist/linux/build.py \
 	dist/arch.py \
 	dist/linux/standalone-linux.py \
-	dist/macosx/fs-uae-config.icns \
-	dist/macosx/fs-uae.icns \
-	dist/macosx/PkgInfo \
-	dist/macosx/sign.py \
-	dist/macosx/standalone.py \
+	dist/macos/fs-uae-config.icns \
+	dist/macos/fs-uae.icns \
+	dist/macos/PkgInfo \
+	dist/macos/sign.py \
+	dist/macos/standalone.py \
 	dist/windows/clib.py \
 	dist/windows/iscc.py \
 	dist/windows/sign.py \
@@ -1456,13 +1457,45 @@ standalone: fs-uae$(EXEEXT) fs-uae.dat
 	zip -A fs-uae$(EXEEXT)
 
 bindist:
-	./bootstrap
-	./configure
 	make distdir
 if LINUX
 	cd fs-uae-@PACKAGE_VERSION@ && fs-sdk-linux-x86-64 ./configure
 	fs-sdk-linux-x86-64 make -C fs-uae-@PACKAGE_VERSION@ -j4
 	fs-sdk-linux-x86-64 make -C fs-uae-@PACKAGE_VERSION@/dist/linux
 	mv fs-uae-@PACKAGE_VERSION@/fs-uae_@PACKAGE_VERSION@_linux_x86-64.tar.xz .
+endif
+if MACOS
+	cd fs-uae-@PACKAGE_VERSION@ && ./configure
+	make -C fs-uae-@PACKAGE_VERSION@ -j4
+	make -C fs-uae-@PACKAGE_VERSION@/dist/macos
+	mv fs-uae-@PACKAGE_VERSION@/fs-uae_@PACKAGE_VERSION@_macos_x86-64.tar.xz .
+endif
+if WINDOWS
+	cd fs-uae-@PACKAGE_VERSION@ && ./configure
+	make -C fs-uae-@PACKAGE_VERSION@ -j2
+	make -C fs-uae-@PACKAGE_VERSION@/dist/windows tar.xz
+	mv fs-uae-@PACKAGE_VERSION@/fs-uae_@PACKAGE_VERSION@_windows_x86-64.tar.xz .
+endif
+	rm -Rf fs-uae-@PACKAGE_VERSION@
+
+bindist-x86:
+	make distdir
+if LINUX
+	cd fs-uae-@PACKAGE_VERSION@ && fs-sdk-linux-x86 ./configure
+	fs-sdk-linux-x86 make -C fs-uae-@PACKAGE_VERSION@ -j4
+	fs-sdk-linux-x86 make -C fs-uae-@PACKAGE_VERSION@/dist/linux
+	mv fs-uae-@PACKAGE_VERSION@/fs-uae_@PACKAGE_VERSION@_linux_x86.tar.xz .
+endif
+if MACOS
+	cd fs-uae-@PACKAGE_VERSION@ && ./configure
+	make -C fs-uae-@PACKAGE_VERSION@ -j4
+	make -C fs-uae-@PACKAGE_VERSION@/dist/macos
+	mv fs-uae-@PACKAGE_VERSION@/fs-uae_@PACKAGE_VERSION@_macos_x86.tar.xz .
+endif
+if WINDOWS
+	cd fs-uae-@PACKAGE_VERSION@ && ./configure
+	make -C fs-uae-@PACKAGE_VERSION@ -j2
+	make -C fs-uae-@PACKAGE_VERSION@/dist/windows tar.xz
+	mv fs-uae-@PACKAGE_VERSION@/fs-uae_@PACKAGE_VERSION@_windows_x86.tar.xz .
 endif
 	rm -Rf fs-uae-@PACKAGE_VERSION@

@@ -135,6 +135,7 @@ struct cache030
 	uae_u32 data[4];
 	bool valid[4];
 	uae_u32 tag;
+	uae_u8 fc;
 };
 
 #define CACHESETS040 64
@@ -171,6 +172,7 @@ struct regstruct
 	uae_u8 *pc_oldp;
 	uae_u16 opcode;
 	uae_u32 instruction_pc;
+	uae_u32 instruction_pc_user_exception;
 
 	uae_u16 irc, ir, db;
 	volatile uae_u32 spcflags;
@@ -335,6 +337,11 @@ extern uae_u32(*x_cp_next_iword)(void);
 extern uae_u32(*x_cp_next_ilong)(void);
 
 extern uae_u32(REGPARAM3 *x_cp_get_disp_ea_020)(uae_u32 base, int idx) REGPARAM;
+
+extern bool debugmem_trace;
+extern void branch_stack_push(uaecptr, uaecptr);
+extern void branch_stack_pop_rte(uaecptr);
+extern void branch_stack_pop_rts(uaecptr);
 
 /* direct (regs.pc_p) access */
 
@@ -563,10 +570,10 @@ extern uae_u32 REGPARAM3 get_disp_ea_020 (uae_u32 base, int idx) REGPARAM;
 extern uae_u32 REGPARAM3 get_bitfield (uae_u32 src, uae_u32 bdata[2], uae_s32 offset, int width) REGPARAM;
 extern void REGPARAM3 put_bitfield (uae_u32 dst, uae_u32 bdata[2], uae_u32 val, uae_s32 offset, int width) REGPARAM;
 
-extern void m68k_disasm_ea (uaecptr addr, uaecptr *nextpc, int cnt, uae_u32 *seaddr, uae_u32 *deaddr);
-extern void m68k_disasm (uaecptr addr, uaecptr *nextpc, int cnt);
-extern void m68k_disasm_2 (TCHAR *buf, int bufsize, uaecptr addr, uaecptr *nextpc, int cnt, uae_u32 *seaddr, uae_u32 *deaddr, int safemode);
-extern void sm68k_disasm (TCHAR*, TCHAR*, uaecptr addr, uaecptr *nextpc);
+extern void m68k_disasm_ea (uaecptr addr, uaecptr *nextpc, int cnt, uae_u32 *seaddr, uae_u32 *deaddr, uaecptr lastpc);
+extern void m68k_disasm (uaecptr addr, uaecptr *nextpc, uaecptr lastpc, int cnt);
+extern void m68k_disasm_2 (TCHAR *buf, int bufsize, uaecptr addr, uaecptr *nextpc, int cnt, uae_u32 *seaddr, uae_u32 *deaddr, uaecptr lastpc, int safemode);
+extern void sm68k_disasm (TCHAR*, TCHAR*, uaecptr addr, uaecptr *nextpc, uaecptr lastpc);
 extern int get_cpu_model (void);
 
 extern void set_cpu_caches (bool flush);
@@ -589,8 +596,8 @@ extern void init_m68k (void);
 extern void init_m68k_full (void);
 extern void m68k_go (int);
 extern void m68k_dumpstate (uaecptr *);
-extern void m68k_dumpstate (uaecptr, uaecptr *);
-extern void m68k_dumpcache (void);
+extern void m68k_dumpstate(uaecptr *, uaecptr);
+extern void m68k_dumpcache (bool);
 extern int getDivu68kCycles (uae_u32 dividend, uae_u16 divisor);
 extern int getDivs68kCycles (uae_s32 dividend, uae_s16 divisor);
 extern void divbyzero_special (bool issigned, uae_s32 dst);
