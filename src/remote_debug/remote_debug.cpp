@@ -823,6 +823,9 @@ static bool send_exception (bool detailed) {
 	if (processing_message) {
 		// send is delayed
 		exception_send_pending = true;
+		if (log_remote_protocol_enabled) {
+			fs_log("[REMOTE_DEBUGGER] send exception delayed\n");
+		}
 		return true;
 	}
 	// this function will just exit if already connected
@@ -1480,6 +1483,9 @@ static void update_connection (void)
 		processing_message = false;
 
 		if (exception_send_pending) {
+			if (log_remote_protocol_enabled) {
+				fs_log("[REMOTE_DEBUGGER] exception delayed (pending) sent\n");
+			}
 			send_exception(true);
 			exception_send_pending = false;
 		}
