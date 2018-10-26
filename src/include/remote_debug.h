@@ -64,6 +64,7 @@ void remote_debug_check_exception();
 #define ERROR_SEND_MEMORY_PARSE               "E0f" // Error during the packet parse for command send memory
 #define ERROR_UNKOWN_REGISTER                 "E10" // Unknown register
 #define ERROR_INVALID_FRAME_ID                "E11" // Invalid Frame Id
+#define ERROR_INVALID_MEMORY_LOCATION         "E12" // Invalid memory location
 #define ERROR_SET_MEMORY_PARSE                "E20" // Error during the packet parse for command set memory
 #define ERROR_SET_MEMORY_PARSE_MISSING_END    "E21" // Missing end packet for a set memory message
 #define ERROR_SET_MEMORY_INVALID_ADDRESS      "E22" // Address not safe for a set memory command

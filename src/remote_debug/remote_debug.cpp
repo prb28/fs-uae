@@ -517,6 +517,7 @@ static bool send_memory (char* packet)
     uae_u8* mem;
 	uae_u8 *p1 = NULL;
 	int len = 0;
+	bool validOutput = false;
 
 	uaecptr address;
     int size;
@@ -538,13 +539,17 @@ static bool send_memory (char* packet)
 
 	if (safe_addr (address, 1)) {
 		v = get_byte (address);
+		validOutput = true;
 	} else {
-		if (p1 == NULL) {
-			p1 = save_custom(&len, 0, 1);
-		}
-		int idx = (address & 0x1ff) + 4;
-		if (idx < len) {
-			v = p1[idx];
+		if ((address >= 0xdff000) && (address < 0xdff1fe)) {
+			if (p1 == NULL) {
+				p1 = save_custom(&len, 0, 1);
+			}
+			int idx = (address & 0x1ff) + 4;
+			if ((idx > 0) && (idx < len)) {
+				v = p1[idx];
+				validOutput = true;
+			}
 		}
 	}
 
@@ -554,14 +559,19 @@ static bool send_memory (char* packet)
 	address++; t += 2;
     }
 
-    send_packet_in_place(mem, size * 2);
+	if (validOutput) {
+    	send_packet_in_place(mem, size * 2);
+	} else {
+		fs_log("[REMOTE_DEBUGGER] Invalid memory address required by packet: %s\n", packet);
+		send_packet_string (ERROR_INVALID_MEMORY_LOCATION);
+	}
 
 	if (p1 != NULL) {
 		xfree(p1);
 	}
     xfree(mem);
 
-    return true;
+    return validOutput;
 }
 
 bool set_memory (char* packet, int packet_length)
