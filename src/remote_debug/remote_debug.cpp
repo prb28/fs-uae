@@ -72,6 +72,8 @@ extern uae_u64 debug_illegal_mask;
 
 extern bool debugger_boot();
 
+extern uae_u8 *save_custom(int *len, uae_u8 *dstptr, int full);
+
 extern int debug_dma;
 
 #define GDB_SIGNAL_INT 2			// Interrupt
@@ -513,8 +515,11 @@ static bool send_memory (char* packet)
 {
     uae_u8* t;
     uae_u8* mem;
+	uae_u8 *p1 = NULL;
+	int len = 0;
+	bool validOutput = false;
 
-    uaecptr address;
+	uaecptr address;
     int size;
 
     if (sscanf (packet, "%x,%x:", &address, &size) != 2)
@@ -532,8 +537,21 @@ static bool send_memory (char* packet)
     {
 	uae_u8 v = '?';
 
-	if (safe_addr (address, 1))
+	if (safe_addr (address, 1)) {
 		v = get_byte (address);
+		validOutput = true;
+	} else {
+		if ((address >= 0xdff000) && (address < 0xdff1fe)) {
+			if (p1 == NULL) {
+				p1 = save_custom(&len, 0, 1);
+			}
+			int idx = (address & 0x1ff) + 4;
+			if ((idx > 0) && (idx < len)) {
+				v = p1[idx];
+				validOutput = true;
+			}
+		}
+	}
 
 	t[0] = s_hexchars[v >> 4];
 	t[1] = s_hexchars[v & 0xf];
@@ -541,11 +559,19 @@ static bool send_memory (char* packet)
 	address++; t += 2;
     }
 
-    send_packet_in_place(mem, size * 2);
+	if (validOutput) {
+    	send_packet_in_place(mem, size * 2);
+	} else {
+		fs_log("[REMOTE_DEBUGGER] Invalid memory address required by packet: %s\n", packet);
+		send_packet_string (ERROR_INVALID_MEMORY_LOCATION);
+	}
 
+	if (p1 != NULL) {
+		xfree(p1);
+	}
     xfree(mem);
 
-    return true;
+    return validOutput;
 }
 
 bool set_memory (char* packet, int packet_length)
@@ -823,6 +849,9 @@ static bool send_exception (bool detailed) {
 	if (processing_message) {
 		// send is delayed
 		exception_send_pending = true;
+		if (log_remote_protocol_enabled) {
+			fs_log("[REMOTE_DEBUGGER] send exception delayed\n");
+		}
 		return true;
 	}
 	// this function will just exit if already connected
@@ -1478,8 +1507,11 @@ static void update_connection (void)
 			parse_packet(temp, size);
 
 		processing_message = false;
-
+	} else {
 		if (exception_send_pending) {
+			if (log_remote_protocol_enabled) {
+				fs_log("[REMOTE_DEBUGGER] exception delayed (pending) sent\n");
+			}
 			send_exception(true);
 			exception_send_pending = false;
 		}
