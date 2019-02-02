@@ -1694,12 +1694,15 @@ extern uaecptr get_base (const uae_char *name, int offset);
 //
 void remote_debug_start_executable (struct TrapContext *context)
 {
+	bool useCreateProc = kickstart_version && kickstart_version < 36;
 #ifdef FSUAE
 	uaecptr filename = ds (s_exe_to_run);
 	uaecptr args = ds ("");
+	uaecptr procname = ds ("debug");
 #else
 	uaecptr filename = ds (_T(s_exe_to_run));
 	uaecptr args = ds (_T(""));
+	uaecptr procname = ds (_T("debug"));
 #endif
 
 	// so this is a hack to say that we aren't running from cli
@@ -1787,10 +1790,17 @@ void remote_debug_start_executable (struct TrapContext *context)
 	}
 
 	context_set_areg(context, 6, dosbase);
-	context_set_dreg(context, 1, segs);
-	context_set_dreg(context, 2, 4096);
-	context_set_dreg(context, 3, args);
-	context_set_dreg(context, 4, 0);
+	if (useCreateProc) {
+		context_set_dreg(context, 1, procname); // proc name
+		context_set_dreg(context, 2, 128); // priority
+		context_set_dreg(context, 3, segs);
+		context_set_dreg(context, 4, 4096); // stack size
+	} else {	
+		context_set_dreg(context, 1, segs);
+		context_set_dreg(context, 2, 4096);
+		context_set_dreg(context, 3, args);
+		context_set_dreg(context, 4, 0);
+	}
 
 	update_debug_illegal();
 	deactive_debugger ();
