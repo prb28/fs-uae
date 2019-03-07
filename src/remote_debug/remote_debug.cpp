@@ -62,7 +62,7 @@
 #include "uae.h"
 #include "debugmem.h"
 
-//extern int exception_debugging;
+extern int exception_debugging;
 extern int debugger_active;
 extern bool debugmem_trace;
 static rconn *s_conn = 0;
@@ -75,6 +75,8 @@ extern bool debugger_boot();
 extern uae_u8 *save_custom(int *len, uae_u8 *dstptr, int full);
 
 extern int debug_dma;
+
+extern int debug_copper;
 
 #define GDB_SIGNAL_INT 2			// Interrupt
 #define GDB_SIGNAL_ILL 4			// Illegal instruction
@@ -98,10 +100,13 @@ extern int debug_dma;
 #define THREAD_ID_BPL	8			// Thread id designating BIT-PLANE interrupt
 #define THREAD_ID_CPU	0xf			// Thread id designating default cpu execution
 
+#define BREAKPOINT_KIND_SEG_ID_MAX		99  // Maximum segment Id accepted in Breakpoint kind
+#define BREAKPOINT_KIND_ABSOLUTE_ADDR	100 // Breakpoint Kind = Absolute address (no segment defined)
+#define BREAKPOINT_KIND_MAX				100 // Maximum value for breakpoint kind
+
 static char s_exe_to_run[4096];
 
 static bool log_remote_protocol_enabled = false; // system env configuration : FS_DEBUG_REMOTE_PROTOCOL=1
-static int old_active_debugger = 0;
 
 typedef struct dma_info {
 	uae_u32 event;
@@ -226,6 +231,22 @@ const char *unpack_varlen_hex(const char *buff, uae_u32 *result)
 	return buff;
 }
 
+// Local command to deactivate the debugger
+static void remote_deactivate_debugger () {
+	set_special (SPCFLAG_BRK);
+	s_state = Running;
+	debugger_active = 0;
+	exception_debugging = 0;
+	step_cpu = true;
+}
+
+// Local command to activate the debugger
+static void remote_activate_debugger () {
+	// We keep the copper in debug mode to check the breakpoints
+	debug_copper = 1;
+	activate_debugger();
+}
+
 //
 // port allows to modify the server socket port
 // time_out allows to set the time UAE will wait at startup for a connection.
@@ -269,8 +290,9 @@ static void remote_debug_init_ (int port, int time_out)
 
 struct Breakpoint {
     uaecptr address;
-    uaecptr seg_address;
+    uaecptr offset;
     uaecptr seg_id;
+	uae_u32 kind;
     bool enabled;
     bool needs_resolve;
     bool temp_break;
@@ -958,8 +980,22 @@ static bool send_exception (int processId, int threadId, bool detailed, bool sen
 }
 
 static bool send_all_exceptions () {
-	send_exception (PROCESS_ID_SYSTEM, THREAD_ID_CPU, true, true);
-	send_exception (PROCESS_ID_SYSTEM, THREAD_ID_COP, true, true);
+	bool returned_value = true;
+	bool exception_sent = false;
+	if (debugger_active) {
+		returned_value = send_exception (PROCESS_ID_SYSTEM, THREAD_ID_CPU, true, true);
+		exception_sent = true;
+	}
+	if (debug_copper) {
+		returned_value = returned_value && send_exception (PROCESS_ID_SYSTEM, THREAD_ID_COP, true, true);
+		exception_sent = true;
+	}
+	if (!exception_sent) {
+		// Send ok
+		send_packet_string ("OK");
+		returned_value = true;
+	}
+	return returned_value;
 }
 
 void remote_debug_check_exception_ (void) {
@@ -997,13 +1033,13 @@ static bool step(int processId, int threadId)
 		else
 			s_state = Tracing;
 
-		activate_debugger ();
+		remote_activate_debugger ();
 	} else if (threadId == THREAD_ID_COP) {
 		// copper step
 		debug_copper = 1|2;
 		step_cpu = true;
 		did_step_copper = true;
-		deactivate_debugger ();
+		remote_activate_debugger ();
 	}
 	//exception_debugging = 0;
 	return true;
@@ -1016,7 +1052,7 @@ static bool step_next_instruction (int processId, int threadId) {
 		uaecptr pc = m68k_getpc ();
 		m68k_disasm (pc, &nextpc, 0xffffffff, 1);
 
-		activate_debugger ();
+		remote_activate_debugger ();
 
 		step_cpu = true;
 		did_step_cpu = true;
@@ -1031,8 +1067,9 @@ static bool step_next_instruction (int processId, int threadId) {
 	} else if (threadId == THREAD_ID_COP) {
 		// copper step
 		debug_copper = 1|2;
+		step_cpu = true;
 		did_step_copper = true;
-		deactivate_debugger();
+		remote_activate_debugger ();
 	}
 	return true;
 }
@@ -1261,17 +1298,8 @@ static bool handle_thread ()
 	return true;
 }
 
-static void deactive_debugger () {
-	set_special (SPCFLAG_BRK);
-	s_state = Running;
-	debugger_active = 0;
-	old_active_debugger = 0;
-	exception_debugging = 0;
-	step_cpu = true;
-}
-
 static bool kill_program () {
-	deactive_debugger ();
+	remote_deactivate_debugger ();
 	uae_reset (0, 0);
     s_segment_count = 0;
 
@@ -1297,9 +1325,9 @@ static bool continue_exec (int processId, int threadId, char* packet)
 			m68k_setpci(address);
 		}
 		fs_log("[REMOTE_DEBUGGER] remote_debug: start running...\n");
-		deactive_debugger ();
+		remote_deactivate_debugger ();
 	} else if (threadId == THREAD_ID_COP) {
-		debug_copper = 0;
+		debug_copper = 1|4;
 	}
 	reply_ok ();	
 	return true;
@@ -1318,103 +1346,63 @@ static int has_breakpoint_address(uaecptr address)
 
 static void resolve_breakpoint_seg_offset (Breakpoint* breakpoint)
 {
-    uaecptr seg_id = breakpoint->seg_id;
-    uaecptr seg_address = breakpoint->seg_address;
+    uae_u32 segId = breakpoint->kind;
+    uaecptr offset = breakpoint->offset;
 
-    if (seg_id >= s_segment_count)
-    {
+    if (segId >= s_segment_count) {
 		if (log_remote_protocol_enabled) {
-			fs_log("[REMOTE_DEBUGGER] Segment id >= segment_count (%d - %d)\n", seg_id, s_segment_count);
+			fs_log("[REMOTE_DEBUGGER] Segment id >= segment_count (%d - %d)\n", segId, s_segment_count);
 		}
 		breakpoint->needs_resolve = true;
 		return;
-    }
-
-    breakpoint->address = s_segment_info[seg_id].address + seg_address;
+    } else  {
+		breakpoint->seg_id = segId;
+    	breakpoint->address = s_segment_info[segId].address + offset;
+	}
     breakpoint->needs_resolve = false;
-
 	if (log_remote_protocol_enabled) {
-	    fs_log("[REMOTE_DEBUGGER] resolved breakpoint (%x - %x) -> 0x%08x\n", seg_address, seg_id, breakpoint->address);
+	    fs_log("[REMOTE_DEBUGGER] resolved breakpoint (%x - %x) -> 0x%08x\n", offset, segId, breakpoint->address);
 	}
 }
 
-static bool set_offset_seg_breakpoint (uaecptr address, uae_u32 segment_id, int add)
+static bool set_offset_seg_breakpoint (uaecptr offset, uae_u32 kind)
 {
-    // Remove breakpoint
+	s_breakpoints[s_breakpoint_count].offset = offset;
+	s_breakpoints[s_breakpoint_count].kind = kind;
+    resolve_breakpoint_seg_offset (&s_breakpoints[s_breakpoint_count]);
+	s_breakpoint_count++;
+    return reply_ok ();
+}
 
-    if (!add)
-    {
-		for (int i = 0; i < s_breakpoint_count; ++i)
-		{
-			if (s_breakpoints[i].seg_address == address && s_breakpoints[i].seg_id == segment_id) {
+static bool set_absolute_address_breakpoint (uaecptr offset)
+{
+	if (log_remote_protocol_enabled) {
+		fs_log("[REMOTE_DEBUGGER] Added absolute address breakpoint at 0x%08x \n", offset);
+	}
+	s_breakpoints[s_breakpoint_count].address = offset;
+	s_breakpoints[s_breakpoint_count].kind = BREAKPOINT_KIND_ABSOLUTE_ADDR;
+	s_breakpoints[s_breakpoint_count].needs_resolve = false;
+	s_breakpoint_count++;
+	return reply_ok ();
+}
+
+static bool remove_breakpoint (uaecptr offset, uae_u32 kind) 
+{
+	for (int i = 0; i < s_breakpoint_count; ++i) {
+		if ((s_breakpoints[i].address == offset) ||
+			(s_breakpoints[i].offset == offset && s_breakpoints[i].seg_id == kind)) {
 			s_breakpoints[i] = s_breakpoints[s_breakpoint_count - 1];
 			s_breakpoint_count--;
 			return reply_ok ();
-			}
 		}
-    }
-
-	s_breakpoints[s_breakpoint_count].seg_address = address;
-	s_breakpoints[s_breakpoint_count].seg_id = segment_id;
-
-    resolve_breakpoint_seg_offset (&s_breakpoints[s_breakpoint_count]);
-
-	s_breakpoint_count++;
-
-    return reply_ok ();
+	}
+	return reply_ok ();
 }
 
 static bool set_breakpoint_address (char* packet, int add)
 {
-	uaecptr address;
-	uaecptr segment;
-
-	if (log_remote_protocol_enabled) {
-		fs_log("[REMOTE_DEBUGGER] parsing breakpoint\n");
-	}
-
-	// if we have two args it means that the data is of type offset,segment and we need to resolve that.
-	// if we are in running state we try to resolve it directly otherwise we just add it to the list
-	// and resolve it after we loaded the executable
-
-	int scan_res = sscanf (packet, "%x,%d", &address, &segment);
-
-	if (scan_res == 2)
-	{
-		if (log_remote_protocol_enabled) {
-			fs_log("[REMOTE_DEBUGGER] offset 0x%x seg_id %d\n", address, segment);
-		}
-		return set_offset_seg_breakpoint (address, segment, add);
-	}
-
-	if (scan_res != 1)
-	{
-		fs_log("[REMOTE_DEBUGGER] failed to parse memory packet: %s\n", packet);
-		send_packet_string (ERROR_SET_BREAKPOINT_PARSE);
-		return false;
-	}
-
-	if (log_remote_protocol_enabled) {
-		fs_log("[REMOTE_DEBUGGER] parsed 0x%x\n", address);
-		fs_log("[REMOTE_DEBUGGER] %s:%d\n", __FILE__, __LINE__);
-	}
-
-	int bp_offset = has_breakpoint_address(address);
-
-	// Check if we already have a breakpoint at the address, if we do skip it
-
-	if (!add)
-	{
-		if (bp_offset != -1)
-		{
-			if (log_remote_protocol_enabled) {
-				fs_log("[REMOTE_DEBUGGER] Removed breakpoint at 0x%8x\n", address);
-			}
-			s_breakpoints[bp_offset] = s_breakpoints[s_breakpoint_count - 1];
-			s_breakpoint_count--;
-		}
-		return reply_ok ();
-	}
+	uaecptr offset;
+	uae_u32 kind = BREAKPOINT_KIND_ABSOLUTE_ADDR;
 
 	if (s_breakpoint_count + 1 >= MAX_BREAKPOINT_COUNT)
 	{
@@ -1424,13 +1412,33 @@ static bool set_breakpoint_address (char* packet, int add)
 	}
 
 	if (log_remote_protocol_enabled) {
-		fs_log("[REMOTE_DEBUGGER] Added breakpoint at 0x%08x\n", address);
+		fs_log("[REMOTE_DEBUGGER] parsing breakpoint\n");
 	}
+	
+	// if we have two args it means that the data is of type offset,kind and we need to resolve that.
+	// if we are in running state we try to resolve it directly otherwise we just add it to the list
+	// and resolve it after we loaded the executable
+	// THe kind can be a segment id or an absolute or copper address
 
-	s_breakpoints[s_breakpoint_count].address = address;
-	s_breakpoint_count++;
+	int scan_res = sscanf (packet, "%x,%x", &offset, &kind);
 
-	return reply_ok ();
+	if (scan_res < 1)
+	{
+		fs_log("[REMOTE_DEBUGGER] failed to parse memory packet: %s\n", packet);
+		send_packet_string (ERROR_SET_BREAKPOINT_PARSE);
+		return false;
+	}
+	if (!add) {
+		remove_breakpoint(offset, kind);
+	} else if (kind > BREAKPOINT_KIND_MAX) {
+		fs_log("[REMOTE_DEBUGGER] Breakpoint kind invalid: %d\n", kind);
+		send_packet_string (ERROR_UNKNOWN_BREAKPOINT_KIND);
+		return false;
+	} else if (kind <= BREAKPOINT_KIND_SEG_ID_MAX) {
+		return set_offset_seg_breakpoint (offset, kind);
+    } else {
+		return set_absolute_address_breakpoint (offset);
+    }
 }
 
 // The message is z1,0,0;Xf,nnnnnnnnnnnnnnnn
@@ -1503,8 +1511,9 @@ static bool pause_exec(int processId, int threadId) {
 		s_state = Tracing;
 	} else if (threadId == THREAD_ID_COP) {
 		// Stop the copper
-		debug_copper = 1;
+		debug_copper = 1|2;
 		send_exception (processId, threadId, true, false);
+		s_state = Tracing;
 	}
 	return true;
 }
@@ -1599,17 +1608,22 @@ static bool handle_vcont_query (char* packet)
     return send_packet_in_place(t, (int)((uintptr_t)buffer - (uintptr_t)t) - 1);
 }
 
+static int remove_checksum(char* packet, int length) {
+	for (int i = length; i > 0; --i) {
+		const char c = packet[i];
+		if (c == '#') {
+			packet[i] = 0;
+			return i;
+		}
+	}	
+	return length;
+}
+
 static bool handle_multi_letter_packet (char* packet, int length)
 {
 	int i = 0;
 	// ‘v’ Packets starting with ‘v’ are identified by a multi-letter name, up to the first ‘;’ or ‘?’ (or the end of the packet).
-	for (i = 0; i < length; ++i) {
-		const char c = packet[i];
-		if (c == '#') {
-			packet[i] = 0;
-			break;
-		}
-	}	
+	remove_checksum (packet, length);
 	// multi letters packet ends with '?' or ';' 
 	if (!strncmp(packet, "vCont;", 6)) {
 		return handle_vcont (packet + 6);
@@ -1627,13 +1641,15 @@ static bool handle_multi_letter_packet (char* packet, int length)
 	return false;
 }
 
-static bool handle_packet(char* packet, int length)
+static bool handle_packet(char* packet, int initialLength)
 {
 	const char command = *packet;
 
 	if (log_remote_protocol_enabled) {
 		fs_log("[REMOTE_DEBUGGER] handle packet %s\n", packet);
 	}
+
+	int length = remove_checksum(packet, initialLength);
 
 	// ‘v’ Packets starting with ‘v’ are identified by a multi-letter name, up to the first ‘;’ or ‘?’ (or the end of the packet).
 
@@ -1788,7 +1804,7 @@ static void remote_debug_ (void)
 			set_special (SPCFLAG_BRK);
 
 			if (s_skip_to_pc == pc) {
-				send_exception (PROCESS_ID_SYSTEM, THREAD_ID_CPU, false, false);
+				send_exception (PROCESS_ID_SYSTEM, THREAD_ID_CPU, true, false);
 				s_state = Tracing;
 				s_skip_to_pc = 0xffffffff;
 			}
@@ -1808,8 +1824,8 @@ static void remote_debug_ (void)
 
 			if (s_breakpoints[i].address == pc)
 			{
-				//activate_debugger ();
-				send_exception (PROCESS_ID_SYSTEM, THREAD_ID_CPU, false, false);
+				//remote_activate_debugger ();
+				send_exception (PROCESS_ID_SYSTEM, THREAD_ID_CPU, true, false);
 				if (log_remote_protocol_enabled) {
 					fs_log("[REMOTE_DEBUGGER] switching to tracing\n");
 				}
@@ -1837,15 +1853,6 @@ static void remote_debug_ (void)
 				}
 			}
 		}
-
-		/*
-		if (debugger_active == 1 && old_active_debugger == 0) {
-			did_step_cpu = true;
-			step_cpu = false;
-			s_state = Tracing;
-			old_active_debugger = 1;
-		}
-		*/
 	}
 
 	// Check if we hit some breakpoint and then switch to tracing if we do
@@ -1905,6 +1912,26 @@ static void remote_debug_ (void)
 	}
 }
 
+// Main function that will be called when doing the copper debugging
+
+static void remote_debug_copper_ (uaecptr addr, uae_u16 word1, uae_u16 word2, int hpos, int vpos)
+{
+	// scan breakpoints for the current address
+	for (int i = 0; i < s_breakpoint_count; ++i)
+	{
+		Breakpoint bp = s_breakpoints[i];
+		if (!bp.needs_resolve && addr >= bp.address && addr <= bp.address + 3) {
+			remote_activate_debugger ();
+			send_exception (PROCESS_ID_SYSTEM, THREAD_ID_COP, true, true);
+			if (log_remote_protocol_enabled) {
+				fs_log("[REMOTE_DEBUGGER] Copper breakpoint reached\n");
+			}
+			s_state = Tracing;
+			break;
+		}
+	}
+}
+
 // This function needs to be called at regular interval to keep the socket connection alive
 
 static void remote_debug_update_ (void)
@@ -1915,11 +1942,11 @@ static void remote_debug_update_ (void)
 	rconn_update_listner (s_conn);
 
 	remote_debug_ ();
-    activate_debugger ();
+    remote_activate_debugger ();
 	//exception_debugging = 0;
 
 	if (rconn_poll_read(s_conn)) {
-		activate_debugger ();
+		remote_activate_debugger ();
 		//exception_debugging = 0;
 	}
 	if (vRunCalled) {
@@ -2054,7 +2081,7 @@ void remote_debug_start_executable (struct TrapContext *context)
 	}
 
 	update_debug_illegal();
-	deactive_debugger ();
+	remote_deactivate_debugger ();
 
 	fs_log("[REMOTE_DEBUGGER] remote_debug_start_executable\n");
 }
@@ -2075,6 +2102,7 @@ extern "C"
 {
 	void remote_debug_init(int port, int time_out) { return remote_debug_init_(port, time_out); }
 	void remote_debug(void) { remote_debug_(); }
+	void remote_debug_copper(uaecptr addr, uae_u16 word1, uae_u16 word2, int hpos, int vpos) { remote_debug_copper_(addr, word1, word2, hpos, vpos); }
 	void remote_debug_update(void) { remote_debug_update_(); }
 	void remote_debug_check_exception(void) { remote_debug_check_exception_(); }
 }

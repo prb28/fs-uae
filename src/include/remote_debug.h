@@ -40,6 +40,10 @@ void remote_debug_init (int port, int time_out);
 
 void remote_debug (void);
 
+// Main function for copper debugging
+
+void remote_debug_copper (uaecptr addr, uae_u16 word1, uae_u16 word2, int hpos, int vpos);
+
 // This function needs to be called at regular interval to keep the socket connection alive
 
 void remote_debug_update (void);
@@ -77,6 +81,7 @@ void remote_debug_check_exception();
 #define ERROR_SET_BREAKPOINT_EXCP_PARSE       "E36" // Error during the packet parse for command set exception breakpoint
 #define ERROR_MAX_BREAKPOINTS_REACHED         "E37" // The maximum of breakpoints have been reached
 #define ERROR_UNKNOWN_BREAKPOINT_TYPE         "E38" // Unknown breakpoint type
+#define ERROR_UNKNOWN_BREAKPOINT_KIND         "E39" // Unknown breakpoint kind
 
 // Registers Indexes
 // order of registers are assumed to be
