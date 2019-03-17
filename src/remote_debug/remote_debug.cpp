@@ -162,6 +162,7 @@ static uae_u32 last_exception_pc = 0;
 bool need_ack = true;
 static bool vRunCalled = false;
 int current_traceframe = DEFAULT_TRACEFRAME;
+int current_vStopped_idx = 0;
 
 // Declaration of the update_connection function
 static void update_connection(void);
@@ -243,7 +244,9 @@ static void remote_deactivate_debugger () {
 // Local command to activate the debugger
 static void remote_activate_debugger () {
 	// We keep the copper in debug mode to check the breakpoints
-	debug_copper = 1;
+	if (debug_copper <= 0) {
+		debug_copper = 1;
+	}
 	activate_debugger();
 }
 
@@ -898,22 +901,7 @@ static int map_68k_exception(int exception) {
 	return sig;
 }
 
-static bool send_exception (int processId, int threadId, bool detailed, bool send_now) {
-	if (processing_message && !send_now) {
-		// send is delayed
-		exception_send_pending = true;
-		exception_send_pending_pid = processId;
-		exception_send_pending_tid = threadId;
-		if (log_remote_protocol_enabled) {
-			fs_log("[REMOTE_DEBUGGER] send exception delayed\n");
-		}
-		return true;
-	}
-	// this function will just exit if already connected
-	rconn_update_listner(s_conn);
-
-	unsigned char messageBuffer[512] = { 0 };
-	uae_u8 *t = messageBuffer;
+static uae_u8* write_exception (unsigned char *messageBuffer, int processId, int threadId, bool detailed, bool isNotification) {
 	uae_u8 *buffer = messageBuffer;
 	int sig = 0;
 	if (regs.spcflags & SPCFLAG_BRK) {
@@ -931,6 +919,9 @@ static bool send_exception (int processId, int threadId, bool detailed, bool sen
 	}
 
 	buffer = write_char(buffer, '$');
+	if (isNotification) {
+		buffer = write_string(buffer, "%Stop:");
+	}
 	if (detailed) {
 		buffer = write_char(buffer, 'T');
 	} else  {
@@ -976,26 +967,28 @@ static bool send_exception (int processId, int threadId, bool detailed, bool sen
 		buffer = write_char(buffer, ':');
 		buffer = write_u32 (buffer, get_copper_address(-1));
 	}
-    return send_packet_in_place(t, (int)((uintptr_t)buffer - (uintptr_t)t) - 1);
+	return buffer;
 }
 
-static bool send_all_exceptions () {
-	bool returned_value = true;
-	bool exception_sent = false;
-	if (debugger_active) {
-		returned_value = send_exception (PROCESS_ID_SYSTEM, THREAD_ID_CPU, true, true);
-		exception_sent = true;
+
+static bool send_exception (int processId, int threadId, bool detailed, bool send_now, bool isNotification) {
+	if (processing_message && !send_now) {
+		// send is delayed
+		exception_send_pending = true;
+		exception_send_pending_pid = processId;
+		exception_send_pending_tid = threadId;
+		if (log_remote_protocol_enabled) {
+			fs_log("[REMOTE_DEBUGGER] send exception delayed\n");
+		}
+		return true;
 	}
-	if (debug_copper) {
-		returned_value = returned_value && send_exception (PROCESS_ID_SYSTEM, THREAD_ID_COP, true, true);
-		exception_sent = true;
-	}
-	if (!exception_sent) {
-		// Send ok
-		send_packet_string ("OK");
-		returned_value = true;
-	}
-	return returned_value;
+	// this function will just exit if already connected
+	rconn_update_listner(s_conn);
+
+	unsigned char messageBuffer[512] = { 0 };
+	uae_u8 *t = messageBuffer;
+	uae_u8 *buffer = write_exception (messageBuffer, processId, threadId, detailed, isNotification);
+    return send_packet_in_place(t, (int)((uintptr_t)buffer - (uintptr_t)t) - 1);
 }
 
 void remote_debug_check_exception_ (void) {
@@ -1010,13 +1003,13 @@ void remote_debug_check_exception_ (void) {
 		last_exception_pc = exception_pc;
 		last_exception_sent = false;
 	}
-	if (did_step_copper) {
-		if (log_remote_protocol_enabled) {
-			fs_log("[REMOTE_DEBUGGER] did step copper\n");
-		}
-		send_exception (PROCESS_ID_SYSTEM, THREAD_ID_COP, true, false);
-		did_step_copper = false;
-	}
+	// if (did_step_copper) {
+	// 	if (log_remote_protocol_enabled) {
+	// 		fs_log("[REMOTE_DEBUGGER] did step copper\n");
+	// 	}
+	// 	send_exception (PROCESS_ID_SYSTEM, THREAD_ID_COP, true, false);
+	// 	did_step_copper = false;
+	// }
 }
 
 static bool step(int processId, int threadId)
@@ -1037,9 +1030,8 @@ static bool step(int processId, int threadId)
 	} else if (threadId == THREAD_ID_COP) {
 		// copper step
 		debug_copper = 1|2;
-		step_cpu = true;
 		did_step_copper = true;
-		remote_activate_debugger ();
+		remote_deactivate_debugger();
 	}
 	//exception_debugging = 0;
 	return true;
@@ -1067,9 +1059,8 @@ static bool step_next_instruction (int processId, int threadId) {
 	} else if (threadId == THREAD_ID_COP) {
 		// copper step
 		debug_copper = 1|2;
-		step_cpu = true;
 		did_step_copper = true;
-		remote_activate_debugger ();
+		remote_deactivate_debugger();
 	}
 	return true;
 }
@@ -1240,6 +1231,9 @@ static bool handle_qsupported_packet(char *packet)
 		} else if (!strcmp ("vContSupported", token)) {
 			buffer = write_string(buffer, "vContSupported+");
 			buffer = write_char(buffer, ';');
+		} else if (!strcmp ("QNonStop", token)) {
+			buffer = write_string(buffer, "QNonStop+");
+			buffer = write_char(buffer, ';');
 		}
 		token = strtok(NULL, ";");
 	}
@@ -1296,6 +1290,31 @@ static bool handle_thread ()
 {
 	send_packet_string ("OK");
 	return true;
+}
+
+static bool handle_vstopped ()
+{
+	bool exception_sent = false;
+	if (current_vStopped_idx == 0) {
+		exception_sent = send_exception (PROCESS_ID_SYSTEM, THREAD_ID_CPU, true, true, false);
+		current_vStopped_idx++;
+	} else if (current_vStopped_idx == 1) {
+		exception_sent = send_exception (PROCESS_ID_SYSTEM, THREAD_ID_COP, true, true, false);
+		current_vStopped_idx++;
+	} else {
+		send_packet_string ("OK");
+		current_vStopped_idx = 0;
+		exception_sent= true;
+	}
+	return exception_sent;
+}
+
+static bool handle_qmark ()
+{
+	// Abandonning vStopped reports
+	current_vStopped_idx = 0;
+	// Send first exception
+	return handle_vstopped ();
 }
 
 static bool kill_program () {
@@ -1504,17 +1523,15 @@ static bool set_breakpoint (char* packet, int add)
 static bool pause_exec(int processId, int threadId) {
 	if (threadId == THREAD_ID_CPU) {
 		set_special (SPCFLAG_BRK);
-		send_exception (processId, threadId, true, false);
-		if (log_remote_protocol_enabled) {
-			fs_log("[REMOTE_DEBUGGER] pause demanded -> switching to tracing\n");
-		}
-		s_state = Tracing;
 	} else if (threadId == THREAD_ID_COP) {
 		// Stop the copper
 		debug_copper = 1|2;
-		send_exception (processId, threadId, true, false);
-		s_state = Tracing;
 	}
+	send_exception (processId, threadId, true, false, false);
+	if (log_remote_protocol_enabled) {
+		fs_log("[REMOTE_DEBUGGER] pause demanded -> switching to tracing\n");
+	}
+	s_state = Tracing;
 	return true;
 }
 
@@ -1631,6 +1648,8 @@ static bool handle_multi_letter_packet (char* packet, int length)
 		return pause_exec(PROCESS_ID_SYSTEM, THREAD_ID_CPU);
 	} else if (!strncmp(packet, "vRun", 4)) {
 		return handle_vrun (packet + 5);
+	} else if (!strncmp(packet, "vStopped", 8)) {
+		return handle_vstopped ();
 	} else if (!strncmp(packet, "vCont?", 6)) {
 		return handle_vcont_query (packet + 6);
 	} else {
@@ -1666,7 +1685,7 @@ static bool handle_packet(char* packet, int initialLength)
 		case 'n' : return step_next_instruction (PROCESS_ID_SYSTEM, THREAD_ID_CPU);
 		case 'H' : return handle_thread ();
 		case 'G' : return set_registers ((const uae_u8*)packet + 1);
-		case '?' : return send_all_exceptions ();
+		case '?' : return handle_qmark ();
 		case 'k' : return kill_program ();
 		case 'm' : return send_memory (packet + 1);
 		case 'M' : return set_memory (packet + 1, length - 1);
@@ -1774,7 +1793,7 @@ static void update_connection (void)
 			if (log_remote_protocol_enabled) {
 				fs_log("[REMOTE_DEBUGGER] exception delayed (pending) sent\n");
 			}
-			send_exception(exception_send_pending_pid, exception_send_pending_tid, true, false);
+			send_exception(exception_send_pending_pid, exception_send_pending_tid, true, false, true);
 			exception_send_pending = false;
 		}
 	}
@@ -1788,7 +1807,7 @@ static void remote_debug_ (void)
 
 	// As an exception stored
 	if (!last_exception_sent && (last_exception > 0)) {
-		send_exception (PROCESS_ID_SYSTEM, THREAD_ID_CPU, true, false);
+		send_exception (PROCESS_ID_SYSTEM, THREAD_ID_CPU, true, false, true);
 		if (log_remote_protocol_enabled) {
 			fs_log("[REMOTE_DEBUGGER] switching to tracing\n");
 		}
@@ -1804,7 +1823,7 @@ static void remote_debug_ (void)
 			set_special (SPCFLAG_BRK);
 
 			if (s_skip_to_pc == pc) {
-				send_exception (PROCESS_ID_SYSTEM, THREAD_ID_CPU, true, false);
+				send_exception (PROCESS_ID_SYSTEM, THREAD_ID_CPU, true, false, true);
 				s_state = Tracing;
 				s_skip_to_pc = 0xffffffff;
 			}
@@ -1825,7 +1844,7 @@ static void remote_debug_ (void)
 			if (s_breakpoints[i].address == pc)
 			{
 				//remote_activate_debugger ();
-				send_exception (PROCESS_ID_SYSTEM, THREAD_ID_CPU, true, false);
+				send_exception (PROCESS_ID_SYSTEM, THREAD_ID_CPU, true, false, true);
 				if (log_remote_protocol_enabled) {
 					fs_log("[REMOTE_DEBUGGER] switching to tracing\n");
 				}
@@ -1873,7 +1892,7 @@ static void remote_debug_ (void)
 				if (log_remote_protocol_enabled) {
 					fs_log("[REMOTE_DEBUGGER] did step cpu\n");
 				}
-				send_exception (PROCESS_ID_SYSTEM, THREAD_ID_CPU, true, false);
+				send_exception (PROCESS_ID_SYSTEM, THREAD_ID_CPU, true, false, false);
 				did_step_cpu = false;
 			}
 
@@ -1922,13 +1941,22 @@ static void remote_debug_copper_ (uaecptr addr, uae_u16 word1, uae_u16 word2, in
 		Breakpoint bp = s_breakpoints[i];
 		if (!bp.needs_resolve && addr >= bp.address && addr <= bp.address + 3) {
 			remote_activate_debugger ();
-			send_exception (PROCESS_ID_SYSTEM, THREAD_ID_COP, true, true);
+			send_exception (PROCESS_ID_SYSTEM, THREAD_ID_COP, true, true, true);
 			if (log_remote_protocol_enabled) {
 				fs_log("[REMOTE_DEBUGGER] Copper breakpoint reached\n");
 			}
 			s_state = Tracing;
 			break;
 		}
+	}
+	if (debug_copper & 2) {
+		debug_copper = 1;
+		remote_activate_debugger ();
+		send_exception (PROCESS_ID_SYSTEM, THREAD_ID_COP, true, true, false);
+		if (log_remote_protocol_enabled) {
+			fs_log("[REMOTE_DEBUGGER] Copper step reached\n");
+		}
+		s_state = Tracing;
 	}
 }
 
