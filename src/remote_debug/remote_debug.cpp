@@ -1328,26 +1328,21 @@ static bool kill_program () {
 
 static bool continue_exec (int processId, int threadId, char* packet)
 {
-	if (threadId == THREAD_ID_CPU) {
-		// 'c [addr] Continue at addr, which is the address to resume. If addr is omitted, resume at current address.
+	// 'c [addr] Continue at addr, which is the address to resume. If addr is omitted, resume at current address.
 
-		if ((packet != NULL) && (*packet != '#'))
+	if ((packet != NULL) && (*packet != '#'))
+	{
+		uae_u32 address;
+		if (sscanf (packet, "%x#", &address) != 1)
 		{
-			uae_u32 address;
-
-			if (sscanf (packet, "%x#", &address) != 1)
-			{
-				fs_log("[REMOTE_DEBUGGER] Unable to parse continnue packet %s\n", packet);
-				return false;
-			}
-
-			m68k_setpci(address);
+			fs_log("[REMOTE_DEBUGGER] Unable to parse continnue packet %s\n", packet);
+			return false;
 		}
-		fs_log("[REMOTE_DEBUGGER] remote_debug: start running...\n");
-		remote_deactivate_debugger ();
-	} else if (threadId == THREAD_ID_COP) {
-		debug_copper = 1|4;
+		m68k_setpci(address);
 	}
+	fs_log("[REMOTE_DEBUGGER] remote_debug: continue execution...\n");
+	debug_copper = 1|4;
+	remote_deactivate_debugger ();
 	reply_ok ();	
 	return true;
 }
@@ -1803,6 +1798,7 @@ static void update_connection (void)
 
 static void remote_debug_ (void)
 {
+	bool step_exception_sent = false;
 	uaecptr pc = m68k_getpc ();
 
 	// As an exception stored
@@ -1823,9 +1819,10 @@ static void remote_debug_ (void)
 			set_special (SPCFLAG_BRK);
 
 			if (s_skip_to_pc == pc) {
-				send_exception (PROCESS_ID_SYSTEM, THREAD_ID_CPU, true, false, true);
+				send_exception (PROCESS_ID_SYSTEM, THREAD_ID_CPU, true, false, false);
 				s_state = Tracing;
 				s_skip_to_pc = 0xffffffff;
+				step_exception_sent = true;
 			}
 		}
 
@@ -1892,7 +1889,9 @@ static void remote_debug_ (void)
 				if (log_remote_protocol_enabled) {
 					fs_log("[REMOTE_DEBUGGER] did step cpu\n");
 				}
-				send_exception (PROCESS_ID_SYSTEM, THREAD_ID_CPU, true, false, false);
+				if (!step_exception_sent) {
+					send_exception (PROCESS_ID_SYSTEM, THREAD_ID_CPU, true, false, false);
+				}
 				did_step_cpu = false;
 			}
 
