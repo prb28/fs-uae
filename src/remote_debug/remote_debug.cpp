@@ -1935,17 +1935,21 @@ static void remote_debug_ (void)
 static void remote_debug_copper_ (uaecptr addr, uae_u16 word1, uae_u16 word2, int hpos, int vpos)
 {
 	// scan breakpoints for the current address
-	for (int i = 0; i < s_breakpoint_count; ++i)
-	{
-		Breakpoint bp = s_breakpoints[i];
-		if (!bp.needs_resolve && addr >= bp.address && addr <= bp.address + 3) {
-			remote_activate_debugger ();
-			send_exception (PROCESS_ID_SYSTEM, THREAD_ID_COP, true, true, true);
-			if (log_remote_protocol_enabled) {
-				fs_log("[REMOTE_DEBUGGER] Copper breakpoint reached\n");
+	if (!(debug_copper & 8)) {
+		for (int i = 0; i < s_breakpoint_count; ++i)
+		{
+			Breakpoint bp = s_breakpoints[i];
+			if (!bp.needs_resolve && addr >= bp.address && addr <= bp.address + 3) {
+				debug_copper = 1|8;
+				remote_activate_debugger ();
+				send_exception (PROCESS_ID_SYSTEM, THREAD_ID_COP, true, true, true);
+				if (log_remote_protocol_enabled) {
+					fs_log("[REMOTE_DEBUGGER] Copper breakpoint reached\n");
+				}
+				debug_copper = 1;
+				s_state = Tracing;
+				break;
 			}
-			s_state = Tracing;
-			break;
 		}
 	}
 	if (debug_copper & 2) {
