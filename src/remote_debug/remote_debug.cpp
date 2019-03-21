@@ -993,9 +993,9 @@ static bool send_exception (int processId, int threadId, bool detailed, bool sen
 
 void remote_debug_check_exception_ (void) {
 	int	nr = regs.exception;
-	uae_u32 exception_pc = x_get_long (m68k_areg (regs, 7) + 2);
 	if ((nr > 0) && debug_illegal && (nr <= 63) && (debug_illegal_mask & ((uae_u64)1 << nr)))
 	{
+		uae_u32 exception_pc = x_get_long (m68k_areg (regs, 7) + 2);
 		if (log_remote_protocol_enabled) {
 			fs_log("[REMOTE_DEBUGGER] Exception raised pc 0x%08x - code 0x%08x\n", exception_pc, nr);
 		}
@@ -1003,13 +1003,6 @@ void remote_debug_check_exception_ (void) {
 		last_exception_pc = exception_pc;
 		last_exception_sent = false;
 	}
-	// if (did_step_copper) {
-	// 	if (log_remote_protocol_enabled) {
-	// 		fs_log("[REMOTE_DEBUGGER] did step copper\n");
-	// 	}
-	// 	send_exception (PROCESS_ID_SYSTEM, THREAD_ID_COP, true, false);
-	// 	did_step_copper = false;
-	// }
 }
 
 static bool step(int processId, int threadId)
@@ -1939,7 +1932,8 @@ static void remote_debug_copper_ (uaecptr addr, uae_u16 word1, uae_u16 word2, in
 		for (int i = 0; i < s_breakpoint_count; ++i)
 		{
 			Breakpoint bp = s_breakpoints[i];
-			if (!bp.needs_resolve && addr >= bp.address && addr <= bp.address + 3) {
+			uaecptr realAddr = get_copper_address(-1);
+			if (!bp.needs_resolve && realAddr >= bp.address && realAddr <= bp.address + 3) {
 				debug_copper = 1|8;
 				remote_activate_debugger ();
 				send_exception (PROCESS_ID_SYSTEM, THREAD_ID_COP, true, true, true);
