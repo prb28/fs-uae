@@ -65,7 +65,7 @@ void remote_debug_check_exception();
 #define REMOTE_DEBUGGER_DEFAULT_PORT 6860
 
 // Error codes for the remote protocol
-#define ERROR_PACKET_NOT_SUPPORTED            "E09" // Packet not supported
+#define ERROR_PACKET_NOT_SUPPORTED            "" // Packet not supported
 #define ERROR_SEND_MEMORY_PARSE               "E0f" // Error during the packet parse for command send memory
 #define ERROR_UNKOWN_REGISTER                 "E10" // Unknown register
 #define ERROR_INVALID_FRAME_ID                "E11" // Invalid Frame Id
@@ -82,6 +82,8 @@ void remote_debug_check_exception();
 #define ERROR_MAX_BREAKPOINTS_REACHED         "E37" // The maximum of breakpoints have been reached
 #define ERROR_UNKNOWN_BREAKPOINT_TYPE         "E38" // Unknown breakpoint type
 #define ERROR_UNKNOWN_BREAKPOINT_KIND         "E39" // Unknown breakpoint kind
+#define ERROR_UNABLE_LOAD_SEGMENTS            "E40" // Unable to load segments
+#define ERROR_THREAD_COMMAND_PARSE            "E41" // Thread command parse error
 
 // Registers Indexes
 // order of registers are assumed to be
@@ -93,11 +95,11 @@ void remote_debug_check_exception();
 #define REGISTER_FP0_INDEX 18 // -> 18 to 25
 #define REGISTER_CTRL_INDEX 26
 #define REGISTER_IAR_INDEX 27
-#define REGISTER_LAST_VALID_INDEX 27
 
 // Other infos sent in stop packets after registers 'T'
-#define REGISTER_COPPER_ADDR_INDEX 30
+#define REGISTER_COPPER_ADDR_INDEX 28
 
+#define REGISTER_LAST_VALID_INDEX 28
 #endif // REMOTE_DEBUGGER
 
 #endif // UAE_REMOTE_DEBUG

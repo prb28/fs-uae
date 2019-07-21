@@ -5,6 +5,7 @@
 // (c) 1995 Bernd Schmidt
 // (c) 2006 Toni Wilen
 // (c) 2016-2007 Daniel Collin (files remote_debug_* Semi GDB Implementation/remote debugger interface)
+// (c) 2019-2018 Paul Raingeard (Extension of GDB Implementation/remote debugger interface)
 //
 // This implementation is done from scratch and doesn't use any existing gdb-stub code.
 // The idea is to supply a fairly minimal implementation in order to reduce maintaince.
@@ -35,6 +36,26 @@
 // QDmaFrame
 //
 // Send a full-frame worth of timing data
+//-----------------
+//
+//-----------------
+// The tracepoint implementation is incorrect
+//  the QTFrame is used to select a frame, that modifies the behaviour of g command to get the registers
+//-----------------
+// Test with gdb (needs a gdb compiled for amiga arch)
+// Example of launch command for fs-uae
+//    fs-uae --chip_memory=1024 --hard_drive_0=vscode-amiga-wks-example/fs-uae/hd0 --joystick_port_1=none
+//                --amiga_model=A1200 --slow_memory=1792 --remote_debugger=2000 --remote_debugger_log=1
+//                --automatic_input_grab=0
+// '.gdbinit' file:
+//        set debug remote 1
+//        set logging on
+//        set logging overwrite on
+//        target extended-remote localhost:6860
+//        file vscode-amiga-wks-example/fs-uae/hd0/gencop
+//        set remote exec-file dh0:gencop
+//        run
+
 
 #include "debug.h"
 #include "remote_debug.h"
@@ -88,7 +109,7 @@ extern int debug_copper;
 
 #define DEFAULT_TRACEFRAME -1		// Traceframe default index
 
-#define PROCESS_ID_SYSTEM 0			// Process id designating system interrupts
+#define PROCESS_ID_SYSTEM 1			// Process id designating system interrupts
 #define THREAD_ID_AUD0	0			// Thread id designating AUDIO 0 interrupt
 #define THREAD_ID_AUD1	1			// Thread id designating AUDIO 1 interrupt
 #define THREAD_ID_AUD2	2			// Thread id designating AUDIO 2 interrupt
@@ -104,7 +125,10 @@ extern int debug_copper;
 #define BREAKPOINT_KIND_ABSOLUTE_ADDR	100 // Breakpoint Kind = Absolute address (no segment defined)
 #define BREAKPOINT_KIND_MAX				100 // Maximum value for breakpoint kind
 
-static char s_exe_to_run[4096];
+#define PACKET_SIZE		10240 // Communication packet max size
+
+#define EXE_TO_RUN_BUFFER_SIZE 4096
+static char s_exe_to_run[EXE_TO_RUN_BUFFER_SIZE];
 
 static bool log_remote_protocol_enabled = false; // system env configuration : FS_DEBUG_REMOTE_PROTOCOL=1
 
@@ -125,6 +149,10 @@ static segment_info s_segment_info[512];
 static int s_segment_count = 0;
 static int remote_debug_illegal = 0;
 static uae_u64 remote_debug_illegal_mask = 0;
+
+// In real multi-process mode it should be useful
+static int selected_process_id = PROCESS_ID_SYSTEM;
+static int selected_thread_id = THREAD_ID_CPU;
 
 // Multi process support act on thread id name : ppid.tid
 static bool support_multiprocess = true;
@@ -148,8 +176,8 @@ static DebuggerState s_state = Running;
 static bool step_cpu = false;
 static bool did_step_cpu = false;
 static bool did_step_copper = false;
-static uae_u8 s_lastSent[1024];
-static int s_lastSize = 0;
+static uae_u8 s_last_sent[1024];
+static int s_last_size = 0;
 static unsigned int s_socket_update_count = 0;
 static int last_exception = 0;
 static bool last_exception_sent = true;
@@ -160,12 +188,14 @@ static bool processing_message = false;
 static uae_u32 last_exception_pc = 0;
 
 bool need_ack = true;
-static bool vRunCalled = false;
+static bool vrun_called = false;
+static bool debugger_boot_done = false;
 int current_traceframe = DEFAULT_TRACEFRAME;
-int current_vStopped_idx = 0;
+int current_vstopped_idx = 0;
 
 // Declaration of the update_connection function
 static void update_connection(void);
+static void set_offset_seg_breakpoint (uaecptr offset, uae_u32 kind);
 
 extern "C" {
     int remote_debugging = 0;
@@ -284,21 +314,20 @@ static void remote_debug_init_ (int port, int time_out)
 	for (int i = 0; i < time_out * 10; i++)	{
 		update_connection();
 
-		if (vRunCalled)
+		if (vrun_called)
 			return;
 
 		sleep_millis (100); // sleep for 100 ms to not hammer on the socket while waiting
 	}
 }
 
+/** Structure of a breakpoint */
 struct Breakpoint {
-    uaecptr address;
-    uaecptr offset;
-    uaecptr seg_id;
-	uae_u32 kind;
-    bool enabled;
-    bool needs_resolve;
-    bool temp_break;
+    uaecptr address;		// Absolute address
+    uaecptr offset;			// Offset in the segment
+    uaecptr seg_id;			// id of the segment
+	uae_u32 kind;			// Kind of breakpoint : BREAKPOINT_KIND_*
+    bool needs_resolve;		// Has it been resolved : seg_id / offset only can be resolved when the program is loaded
 };
 
 // used when skipping an instruction
@@ -307,6 +336,13 @@ static uaecptr s_skip_to_pc = 0xffffffff;
 static Breakpoint s_breakpoints[MAX_BREAKPOINT_COUNT];
 static int s_breakpoint_count = 0;
 
+
+/**
+ * Parses an int from a hex char
+ * 
+ * @param ch char to parse
+ * @return the integer value
+ */
 static int hex(char ch)
 {
     if ((ch >= 'a') && (ch <= 'f'))
@@ -321,17 +357,26 @@ static int hex(char ch)
     return -1;
 }
 
-const int find_marker(const char* packet, const int offset, const char c, const int length)
+/**
+ * Finds a marker in a buffer
+ * 
+ * @param packet packet buffer to search in
+ * @param offset offset to start search
+ * @param marker marker to search
+ * @param length length of the packet
+ * @return a position or -1 if it was not found
+ */
+const int find_marker(const char* packet, const int offset, const char marker, const int length)
 {
-    for (int i = 0; i < length; ++i) {
-	    if (packet[i] == c)
+    for (int i = offset; i < length; ++i) {
+	    if (packet[i] == marker) {
 		    return i;
+		}
     }
-
     return -1;
 }
 
-// Updated the parameters to activate the exception debugging
+/** Updated the parameters to activate the exception debugging */
 static void update_debug_illegal() {
 	debug_illegal = remote_debug_illegal;
 	debug_illegal_mask = remote_debug_illegal_mask; //0b1111111000000010000011110000000000000000011111111111100; //1 << 4;
@@ -340,25 +385,37 @@ static void update_debug_illegal() {
 static const char s_hexchars [] = "0123456789abcdef";
 static const char* s_ok = "$OK#9a";
 
-static int safe_addr (uaecptr addr, int size)
+
+/**
+ * Finds if it is a safe address or not
+ * 
+ * @param addr Address to check
+ * @param size Size of the address
+ * @return true if it is a safe address
+ */
+static bool safe_addr (uaecptr addr, int size)
 {
     addrbank* ab = &get_mem_bank (addr);
 
     if (!ab)
-	    return 0;
+	    return false;
 
     if (ab->flags & ABFLAG_SAFE)
-	    return 1;
+	    return true;
 
     if (!ab->check (addr, size))
-	    return 0;
+	    return false;
 
     if (ab->flags & (ABFLAG_RAM | ABFLAG_ROM | ABFLAG_ROMIN | ABFLAG_SAFE))
-	    return 1;
+	    return true;
 
-    return 0;
+    return false;
 }
 
+
+/**
+ *  Reply a simple OK message
+ */
 static bool reply_ok()
 {
 	if (log_remote_protocol_enabled) {
@@ -367,6 +424,13 @@ static bool reply_ok()
 	return rconn_send (s_conn, s_ok, 6, 0) == 6;
 }
 
+/**
+ * Write a u32 integer to a hex buffer
+ * 
+ * @param dest the destination buffer
+ * @param v the value to insert
+ * @return The next position (pointer) in the destination buffer
+ */
 static uae_u8* write_u32 (unsigned char* dest, uae_u32 v)
 {
 	uae_u8 c0 = (v >> 24) & 0xff;
@@ -386,6 +450,13 @@ static uae_u8* write_u32 (unsigned char* dest, uae_u32 v)
 	return dest;
 }
 
+/**
+ * Write a u16 integer to a hex buffer
+ * 
+ * @param dest the destination buffer
+ * @param v the value to insert
+ * @return The next position (pointer) in the destination buffer
+ */
 static uae_u8* write_u16 (unsigned char* dest, uae_u16 v)
 {
     uae_u8 c0 = (v >> 8) & 0xff;
@@ -399,6 +470,13 @@ static uae_u8* write_u16 (unsigned char* dest, uae_u16 v)
     return dest + 4;
 }
 
+/**
+ * Write a u8 integer to a hex buffer
+ * 
+ * @param dest the destination buffer
+ * @param v the value to insert
+ * @return The next position (pointer) in the destination buffer
+ */
 static uae_u8* write_u8 (unsigned char* dest, uae_u8 v)
 {
     dest[0] = s_hexchars[v >> 4];
@@ -407,28 +485,85 @@ static uae_u8* write_u8 (unsigned char* dest, uae_u8 v)
     return dest + 2;
 }
 
-static uae_u8* write_string (unsigned char* dest, const char* name)
+/**
+ * Writes a string to the a buffer
+ * 
+ * @param dest the destination buffer
+ * @param str string to write
+ * @return The next position (pointer) in the destination buffer
+ */
+static uae_u8* write_string (unsigned char* dest, const char* str)
 {
-    int len = strlen(name);
-    memcpy(dest, name, len);
+    int len = strlen(str);
+    memcpy(dest, str, len);
     return dest + len;
 }
 
+/**
+ * Reads a string in a hex buffer
+ * 
+ * @param hex_buffer Hex encoded buffer
+ * @param dest_buffer Destination buffer for the decoded string
+ * @param dest_buffer_size Destination buffer size
+ */
+static void read_string(const char *hex_buffer, char* dest_buffer, int dest_buffer_size)
+{
+	const char* current_hex = hex_buffer;
+	int current_pos_dest = 0;
+	size_t len = strlen(hex_buffer)/2;
+	if (len > dest_buffer_size) {
+		len = dest_buffer_size-1;
+	}
+	if (len > 0) {
+		for (size_t i = 0; i < len; ++i) {
+			dest_buffer[current_pos_dest] = hex(current_hex[0]) * 16 + hex(current_hex[1]);
+			current_hex += 2;
+			current_pos_dest++;
+		}
+	}
+	if (current_pos_dest < dest_buffer_size) {
+		dest_buffer[current_pos_dest] = '\0';
+	}
+}
+
+/**
+ * Writes a char to the a buffer
+ * 
+ * @param dest the destination buffer
+ * @param c char to write
+ * @return The next position (pointer) in the destination buffer
+ */
 static uae_u8* write_char (unsigned char* dest, const char c)
 {
 	*dest = c;
     return dest + 1;
 }
 
-static uae_u8* write_threadId (unsigned char* dest, uae_u8 processId, uae_u8 threadId) {
-	unsigned char* newDest = dest;
+/**
+ * Writes the thread id in the destination buffer
+ * 
+ * @param dest the destination buffer
+ * @param process_id the process id
+ * @param thread_id the thread id
+ * @return The next position (pointer) in the destination buffer
+ */
+static uae_u8* write_thread_id (unsigned char* dest, uae_u8 process_id, uae_u8 thread_id) {
+	unsigned char* new_dest = dest;
 	if (support_multiprocess) {
-		newDest = write_u8(newDest, processId);
-		newDest = write_char(newDest, '.');
+		new_dest = write_char(new_dest, 'p');
+		new_dest = write_u8(new_dest, process_id);
+		new_dest = write_char(new_dest, '.');
 	}
-	return write_u8(newDest, threadId);
+	return write_u8(new_dest, thread_id);
 }
 
+/**
+ * Write a double to a hex buffer
+ * 
+ * @param dest the destination buffer
+ * @param v the value to insert
+ * @return The next position (pointer) in the destination buffer
+ */
 static uae_u8* write_double (uae_u8* dest, double v)
 {
     union
@@ -436,23 +571,24 @@ static uae_u8* write_double (uae_u8* dest, double v)
         double fp64;
         uae_u8 u8[8];
     } t;
-
     t.fp64 = v;
-
     for (int i = 0; i < 8; ++i)
     {
         uae_u8 c = t.u8[i];
         *dest++ = s_hexchars[c >> 4];
         *dest++ = s_hexchars[c & 0xf];
     }
-
     return dest;
 }
 
-//
-// This code assumes that '$' has been added at the start and the length is subtrackted to not include it
-//
-
+/**
+ * Sends a buffer
+ * This code assumes that '$' has been added at the start and the length is subtrackted to not include it
+ * 
+ * @param t Buffer to send
+ * @param length length of the buffer to send
+ * @return True if it was send
+ */
 static bool send_packet_in_place (unsigned char* t, int length)
 {
     uae_u8 cs = 0;
@@ -474,7 +610,13 @@ static bool send_packet_in_place (unsigned char* t, int length)
     return rconn_send(s_conn, t, length + 4, 0) == length + 4;
 }
 
-static void send_packet_string (const char* string)
+/**
+ * Send a string message
+ * 
+ * @param string String to send
+ * @return True if the send was done with no error
+ */
+static bool send_packet_string (const char* string)
 {
     uae_u8* s;
     uae_u8* t;
@@ -493,19 +635,36 @@ static void send_packet_string (const char* string)
     t[len + 2] = s_hexchars[cs & 0xf];
     t[len + 3] = 0;
 
-    rconn_send(s_conn, s, len + 4, 0);
+    bool rc = rconn_send(s_conn, s, len + 4, 0);
 
 	if (log_remote_protocol_enabled) {
     	fs_log("[REMOTE_DEBUGGER] [<----] %s\n", s);
 	}
     xfree(s);
+	return rc;
 }
 
+/**
+ * Send the registers values
+ * 
+ * ‘XX…’
+ *   Each byte of register data is described by two hex digits. The bytes with the register are transmitted in target byte order. The size of each register and their position within the ‘g’ packet are determined by the GDB internal gdbarch functions DEPRECATED_REGISTER_RAW_SIZE and gdbarch_register_name.
+ *   When reading registers from a trace frame (see Using the Collected Data), the stub may also return a string of literal ‘x’’s in place of the register data digits, to indicate that the corresponding register has not been collected, thus its value is unavailable. For example, for an architecture with 4 registers of 4 bytes each, the following reply indicates to GDB that registers 0 and 2 have not been collected, while registers 1 and 3 have been collected, and both have zero value:
+ *
+ *  -> g
+ *  <- xxxxxxxx00000000xxxxxxxx00000000
+ *
+ *‘E NN’
+ *
+ *   for an error. 
+ *
+ * @return true if was send without error
+ */
 static bool send_registers (void)
 {
-    uae_u8 registerBuffer[((18 * 4) + (8 * 8)) + (3 * 4) + 5 + 1] = { 0 }; // 16+2 regs + 8 (optional) FPU regs + 3 FPU control regs + space for tags
-    uae_u8* t = registerBuffer;
-    uae_u8* buffer = registerBuffer;
+    uae_u8 register_buffer[((18 * 4) + (8 * 8)) + (3 * 4) + 5 + 1] = { 0 }; // 16+2 regs + 8 (optional) FPU regs + 3 FPU control regs + space for tags
+    uae_u8* t = register_buffer;
+    uae_u8* buffer = register_buffer;
 
     uae_u32 temp;
 
@@ -524,19 +683,15 @@ static bool send_registers (void)
 		if (log_remote_protocol_enabled) {
 			fs_log("[REMOTE_DEBUGGER] current pc %08x\n", m68k_getpc ());
 		}
-
 #ifdef FPUEMU
-		/*
-		if (currprefs.fpu_model)
-		{
-			for (int i = 0; i < 8; ++i)
-				buffer = write_double (buffer, regs.fp[i].fp);
-
-			buffer = write_u32 (buffer, regs.fpcr);
-			buffer = write_u32 (buffer, regs.fpsr);
-			buffer = write_u32 (buffer, regs.fpiar);
-		}
-		*/
+		// if (currprefs.fpu_model)
+		// {
+		// 	for (int i = 0; i < 8; ++i)
+		// 		buffer = write_double (buffer, regs.fp[i].fp);
+		// 	buffer = write_u32 (buffer, regs.fpcr);
+		// 	buffer = write_u32 (buffer, regs.fpsr);
+		// 	buffer = write_u32 (buffer, regs.fpiar);
+		// }
 #endif
 	}
 	else
@@ -568,13 +723,28 @@ static bool send_registers (void)
     return send_packet_in_place(t, (int)((uintptr_t)buffer - (uintptr_t)t) - 1);
 }
 
-static bool send_memory (char* packet)
+
+/**
+ * Handles a read memory request the dumped memory
+ * 
+ * ‘m addr,length’
+ *   Read length addressable memory units starting at address addr (see addressable memory unit). Note that addr may not be aligned to any particular boundary.
+ *   The stub need not use any particular size or alignment when gathering data from memory for the response; even if addr is word-aligned and length is a multiple of the word size, the stub is free to use byte accesses, or not. For this reason, this packet may not be suitable for accessing memory-mapped I/O devices.
+ *   Reply:
+ *   ‘XX…’
+ *       Memory contents; each byte is transmitted as a two-digit hexadecimal number. The reply may contain fewer addressable memory units than requested if the server was able to read only part of the region of memory. 
+ *   ‘E NN’
+ *       NN is errno 
+ * @param packet packet containing the request message
+ * @return true if was send without error
+ */
+static bool handle_read_memory (char* packet)
 {
     uae_u8* t;
     uae_u8* mem;
 	uae_u8 *p1 = NULL;
 	int len = 0;
-	bool validOutput = false;
+	bool valid_output = false;
 
 	uaecptr address;
     int size;
@@ -596,7 +766,7 @@ static bool send_memory (char* packet)
 
 	if (safe_addr (address, 1)) {
 		v = get_byte (address);
-		validOutput = true;
+		valid_output = true;
 	} else {
 		if ((address >= 0xdff000) && (address < 0xdff1fe)) {
 			if (p1 == NULL) {
@@ -605,7 +775,7 @@ static bool send_memory (char* packet)
 			int idx = (address & 0x1ff) + 4;
 			if ((idx > 0) && (idx < len)) {
 				v = p1[idx];
-				validOutput = true;
+				valid_output = true;
 			}
 		}
 	}
@@ -616,7 +786,7 @@ static bool send_memory (char* packet)
 	address++; t += 2;
     }
 
-	if (validOutput) {
+	if (valid_output) {
     	send_packet_in_place(mem, size * 2);
 	} else {
 		fs_log("[REMOTE_DEBUGGER] Invalid memory address required by packet: %s\n", packet);
@@ -628,10 +798,23 @@ static bool send_memory (char* packet)
 	}
     xfree(mem);
 
-    return validOutput;
+    return valid_output;
 }
 
-bool set_memory (char* packet, int packet_length)
+/**
+ * Handles a set memory request
+ * ‘M addr,length:XX…’
+ *   Write length addressable memory units starting at address addr (see addressable memory unit). The data is given by XX…; each byte is transmitted as a two-digit hexadecimal number.
+ *   Reply:
+ *   ‘OK’
+ *       for success 
+ *   ‘E NN’
+ *       for an error (this includes the case where only part of the data was written). 
+ * @param packet packet containing the request message
+ * @param packet_length Length of the packet
+ * @return true if was send without error
+ */
+bool handle_set_memory (char* packet, int packet_length)
 {
     uae_u8* t;
     uae_u8* mem;
@@ -687,27 +870,40 @@ bool set_memory (char* packet, int packet_length)
     return reply_ok ();
 }
 
-bool set_register (char* packet, int packet_length)
+/**
+ * Handles a set register request
+ *‘P n…=r…’
+ *   Write register n… with value r…. The register number n is in hexadecimal, and r… contains two hex digits for each byte in the register (target byte order).
+ *   Reply:
+ *   ‘OK’
+ *       for success 
+ *   ‘E NN’
+ *       for an error 
+ * @param packet packet containing the request message
+ * @param packet_length Length of the packet
+ * @return true if was send without error
+ */
+bool handle_set_register (char* packet, int packet_length)
 {
     char name[256];
-	int registerNumber;
+	int register_number;
 	uaecptr value;
 
-	if (sscanf (packet, "%x=%x#", &registerNumber, &value) != 2) {
+	if (sscanf (packet, "%x=%x#", &register_number, &value) != 2) {
 		fs_log("[REMOTE_DEBUGGER] failed to parse set_register packet: %s\n", packet);
 		send_packet_string (ERROR_SET_REGISTER_PARSE);
 		return false;
     }
 
-	if ((registerNumber < 0) || (registerNumber > REGISTER_LAST_VALID_INDEX)) {
+	if ((register_number < 0) || (register_number > REGISTER_LAST_VALID_INDEX)) {
 		fs_log("[REMOTE_DEBUGGER] The register name '%s' is invalid\n", name);
 		send_packet_string (ERROR_UNKOWN_REGISTER);
 		return false;
 	}
-	if ((registerNumber <= REGISTER_D0_INDEX+7) && (registerNumber >= REGISTER_D0_INDEX)) {
-		m68k_dreg (regs, registerNumber) = value;
-	} else 	if ((registerNumber <= REGISTER_A0_INDEX+7) && (registerNumber >= REGISTER_A0_INDEX)) {
-		m68k_areg (regs, registerNumber) = value;
+	if ((register_number <= REGISTER_D0_INDEX+7) && (register_number >= REGISTER_D0_INDEX)) {
+		m68k_dreg (regs, register_number) = value;
+	} else 	if ((register_number <= REGISTER_A0_INDEX+7) && (register_number >= REGISTER_A0_INDEX)) {
+		m68k_areg (regs, register_number) = value;
 	} else {
 		fs_log("[REMOTE_DEBUGGER] The register name '%s' not supported\n", name);
 		send_packet_string (ERROR_SET_REGISTER_NON_SUPPORTED);
@@ -717,14 +913,29 @@ bool set_register (char* packet, int packet_length)
     return reply_ok ();
 }
 
-bool get_register (char* packet, int packet_length)
+/**
+ * Handles a get register request
+ *‘p n’
+ *   Read the value of register n; n is in hex. See read registers packet, for a description of how the returned register value is encoded.
+ *   Reply:
+ *   ‘XX…’
+ *       the register’s value 
+ *   ‘E NN’
+ *       for an error 
+ *   ‘’
+ *       Indicating an unrecognized query. 
+ * @param packet packet containing the request message
+ * @param packet_length Length of the packet
+ * @return true if was send without error
+ */
+bool handle_get_register (char* packet, int packet_length)
 {
-	int registerNumber;
-    uae_u8 messageBuffer[20] = { 0 };
-    uae_u8* buffer = messageBuffer;
+	int register_number;
+    uae_u8 message_buffer[20] = { 0 };
+    uae_u8* buffer = message_buffer;
 	*buffer++ = '$';
 
-	if (sscanf(packet, "%x#", &registerNumber) != 1)
+	if (sscanf(packet, "%x#", &register_number) != 1)
 	{
 		fs_log("[REMOTE_DEBUGGER] failed to parse get_register packet: %s\n", packet);
 		send_packet_string (ERROR_GET_REGISTER_PARSE);
@@ -733,25 +944,26 @@ bool get_register (char* packet, int packet_length)
 
 	if (current_traceframe < 0) 
 	{
-		if (registerNumber == REGISTER_PC_INDEX)
+		if (register_number == REGISTER_PC_INDEX)
 		{
 			buffer = write_u32 (buffer, m68k_getpc());
 		}
-		else if (registerNumber == REGISTER_SR_INDEX)
+		else if (register_number == REGISTER_SR_INDEX)
 		{
 			buffer = write_u32 (buffer, regs.sr);
 		}
-		else if ((registerNumber <= REGISTER_D0_INDEX+7) && (registerNumber >= REGISTER_D0_INDEX))
+		else if ((register_number <= REGISTER_D0_INDEX+7) && (register_number >= REGISTER_D0_INDEX))
 		{
-			buffer = write_u32 (buffer, m68k_dreg (regs, registerNumber - REGISTER_D0_INDEX));
+			buffer = write_u32 (buffer, m68k_dreg (regs, register_number - REGISTER_D0_INDEX));
 		}
-		else 	if ((registerNumber <= REGISTER_A0_INDEX+7) && (registerNumber >= REGISTER_A0_INDEX))
+		else 	if ((register_number <= REGISTER_A0_INDEX+7) && (register_number >= REGISTER_A0_INDEX))
 		{
-			buffer = write_u32 (buffer, m68k_areg (regs, registerNumber - REGISTER_A0_INDEX));
+			buffer = write_u32 (buffer, m68k_areg (regs, register_number - REGISTER_A0_INDEX));
 		} else {
-			fs_log("[REMOTE_DEBUGGER] The register number '%d' is invalid\n", registerNumber);
-			send_packet_string (ERROR_UNKOWN_REGISTER);
-			return false;
+			fs_log("[REMOTE_DEBUGGER] The register number '%d' is invalid\n", register_number);
+			//send_packet_string ("");
+			//return false;
+			buffer = write_string (buffer, "xxxxxxxx");
 		}
 	}
 	else
@@ -761,25 +973,26 @@ bool get_register (char* packet, int packet_length)
 		debugstackframe *tframe = find_traceframe(false, current_traceframe, &tfnum);
 		if (tframe)
 		{
-			if (registerNumber == REGISTER_PC_INDEX)
+			if (register_number == REGISTER_PC_INDEX)
 			{
 				buffer = write_u32 (buffer, tframe->current_pc);
 			}
-			else if (registerNumber == REGISTER_SR_INDEX)
+			else if (register_number == REGISTER_SR_INDEX)
 			{
 				buffer = write_u32 (buffer, tframe->sr);
 			}
-			else if ((registerNumber <= REGISTER_D0_INDEX+7) && (registerNumber >= REGISTER_D0_INDEX))
+			else if ((register_number <= REGISTER_D0_INDEX+7) && (register_number >= REGISTER_D0_INDEX))
 			{
-				buffer = write_u32(buffer, tframe->regs[registerNumber]);
+				buffer = write_u32(buffer, tframe->regs[register_number]);
 			}
-			else 	if ((registerNumber <= REGISTER_A0_INDEX+7) && (registerNumber >= REGISTER_A0_INDEX))
+			else 	if ((register_number <= REGISTER_A0_INDEX+7) && (register_number >= REGISTER_A0_INDEX))
 			{
-				buffer = write_u32(buffer, tframe->regs[registerNumber]);
+				buffer = write_u32(buffer, tframe->regs[register_number]);
 			} else {
-				fs_log("[REMOTE_DEBUGGER] The register number '%d' is invalid\n", registerNumber);
-				send_packet_string (ERROR_UNKOWN_REGISTER);
-				return false;
+				fs_log("[REMOTE_DEBUGGER] The register number '%d' is invalid\n", register_number);
+				buffer = write_string (buffer, "xxxxxxxx");
+//				send_packet_string ("");
+//				return sen;
 			}
 		}
 		else
@@ -789,26 +1002,33 @@ bool get_register (char* packet, int packet_length)
 			return false;
 		}
 	}
-	return send_packet_in_place(messageBuffer, 8);
+	return send_packet_in_place(message_buffer, 8);
 }
 
-
+/**
+ * Get the u32 value from hex data
+ * 
+ * @param data Data to parse
+ * @return value parsed
+ */
 static uae_u32 get_u32 (const uae_u8** data)
 {
     const uae_u8* temp = *data;
-
     uae_u32 t[4];
-
     for (int i = 0; i < 4; ++i) {
 	t[i] = hex(temp[0]) << 4 | hex(temp[1]);
 	temp += 2;
     }
-
     *data = temp;
-
     return (t[0] << 24) | (t[1] << 16) | (t[2] << 8) | t[3];
 }
 
+/**
+ * Get the double value from hex data
+ * 
+ * @param data Data to parse
+ * @return value parsed
+ */
 static uae_u32 get_double (const uae_u8** data)
 {
 	const uae_u8* temp = *data;
@@ -828,7 +1048,19 @@ static uae_u32 get_double (const uae_u8** data)
 	return t.d;
 }
 
-static bool set_registers (const uae_u8* data)
+/**
+ * Handles a set registers request
+ *‘G XX…’
+ *   Write general registers. See read registers packet, for a description of the XX… data.
+ *   Reply:
+ *   ‘OK’
+ *       for success 
+ *   ‘E NN’
+ *       for an error 
+ * @param data Data containing the registers values
+ * @return true if was send without error
+ */
+static bool handle_set_registers (const uae_u8* data)
 {
     // order of registers are assumed to be
     // d0-d7, a0-a7, sr, pc [optional fp0-fp7, control, sr, iar)
@@ -855,16 +1087,18 @@ static bool set_registers (const uae_u8* data)
     }
     */
 #endif
-
-    reply_ok ();
-
-    return false;
+    return reply_ok ();
 }
 
 
+/**
+ * Maps m68k exception signals to GDB standard signals
+ * 
+ * @param exception signal
+ * @return GDB signal
+ */
 static int map_68k_exception(int exception) {
     int sig = 0;
-
     switch (exception)
     {
         case 2: sig = GDB_SIGNAL_BUS; break; // bus error
@@ -892,17 +1126,33 @@ static int map_68k_exception(int exception) {
         case 54: sig = GDB_SIGNAL_FPE; break; // NAN
         default: sig = GDB_SIGNAL_EMT; // "software generated"
     }
-
     if ((sig == GDB_SIGNAL_ILL) || (sig == GDB_SIGNAL_FPE)) {
 		fs_log("[REMOTE_DEBUGGER] exception %08x pc %08x: sig %08x\n", exception, last_exception_pc, sig);
 		m68k_setpc (last_exception_pc);
     }
-
 	return sig;
 }
 
-static uae_u8* write_exception (unsigned char *messageBuffer, int processId, int threadId, bool detailed, bool isNotification) {
-	uae_u8 *buffer = messageBuffer;
+/**
+ * Write a exception description in a reply buffer
+ * ‘S AA’
+ *   The program received signal number AA (a two-digit hexadecimal number). This is equivalent to a ‘T’ response with no n:r pairs.
+ *‘T AA n1:r1;n2:r2;…’
+ *   The program received signal number AA (a two-digit hexadecimal number). This is equivalent to an ‘S’ response, except that the ‘n:r’ pairs can carry values of important registers and other information directly in the stop reply packet, reducing round-trip latency. Single-step and breakpoint traps are reported this way. Each ‘n:r’ pair is interpreted as follows:
+ *       If n is a hexadecimal number, it is a register number, and the corresponding r gives that register’s value. The data r is a series of bytes in target byte order, with each byte given by a two-digit hex number.
+ *       If n is ‘thread’, then r is the thread-id of the stopped thread, as specified in thread-id syntax.
+ *       If n is ‘core’, then r is the hexadecimal number of the core on which the stop event was detected.
+ *       If n is a recognized stop reason, it describes a more specific event that stopped the target. The currently defined stop reasons are listed below. The aa should be ‘05’, the trap signal. At most one stop reason should be present.
+ *       Otherwise, GDB should ignore this ‘n:r’ pair and go on to the next; this allows us to extend the protocol in the future. 
+ * @param message_buffer Message buffer destination
+ * @param process_id Process id
+ * @param thread_id Thread id
+ * @param detailed If true we will send a detailed message 'T', if false a standard message 'S'
+ * @param is_notification If true the message will be formated as a notification, with a name
+ * @return uae_u8* Next position to write in the buffer
+ */
+static uae_u8* write_exception (unsigned char *message_buffer, int process_id, int thread_id, bool detailed, bool is_notification) {
+	uae_u8 *buffer = message_buffer;
 	int sig = 0;
 	if (regs.spcflags & SPCFLAG_BRK) {
 		// It's a breakpoint
@@ -919,7 +1169,7 @@ static uae_u8* write_exception (unsigned char *messageBuffer, int processId, int
 	}
 
 	buffer = write_char(buffer, '$');
-	if (isNotification) {
+	if (is_notification) {
 		buffer = write_string(buffer, "%Stop:");
 	}
 	if (detailed) {
@@ -928,26 +1178,36 @@ static uae_u8* write_exception (unsigned char *messageBuffer, int processId, int
 		buffer = write_char(buffer, 'S');
 	}
 	buffer = write_u8(buffer, sig);
+	buffer = write_char(buffer, ';');
 
 	if (detailed)
 	{
+		// Stop reason
+		if (sig == GDB_SIGNAL_TRAP) {
+			buffer = write_string(buffer, "swbreak");
+		} else {
+			buffer = write_string(buffer, "hwbreak");
+		}
+		buffer = write_char(buffer, ':');
+		buffer = write_char(buffer, ';');
+		
 		// Thread id
 		buffer = write_string(buffer, "thread");
 		buffer = write_char(buffer, ':');
-		buffer = write_threadId(buffer, processId, threadId);
+		buffer = write_thread_id(buffer, process_id, thread_id);
 		buffer = write_char(buffer, ';');
 
-		int regId = REGISTER_D0_INDEX;
+		int reg_id = REGISTER_D0_INDEX;
 		for (int i = 0; i < 8; ++i) {
-			buffer = write_u8(buffer, regId++);
+			buffer = write_u8(buffer, reg_id++);
 			buffer = write_char(buffer, ':');
 			buffer = write_u32 (buffer, m68k_dreg (regs, i));
 			buffer = write_char(buffer, ';');
 		}
 
-		regId = REGISTER_A0_INDEX;
+		reg_id = REGISTER_A0_INDEX;
 		for (int i = 0; i < 8; ++i) {
-			buffer = write_u8(buffer, regId++);
+			buffer = write_u8(buffer, reg_id++);
 			buffer = write_char(buffer, ':');
 			buffer = write_u32 (buffer, m68k_areg (regs, i));
 			buffer = write_char(buffer, ';');
@@ -962,21 +1222,40 @@ static uae_u8* write_exception (unsigned char *messageBuffer, int processId, int
 		buffer = write_u32 (buffer, m68k_getpc ());
 		buffer = write_char(buffer, ';');
 
+		// // Other registers filled with 0
+		// for (int i = REGISTER_PC_INDEX + 1; i < REGISTER_COPPER_ADDR_INDEX; i++) {
+		// 	buffer = write_u8(buffer, i);
+		// 	buffer = write_char(buffer, ':');
+		// 	buffer = write_u32 (buffer, 0);
+		// 	buffer = write_char(buffer, ';');
+		// }
+		
 		// Other infos
-		buffer = write_u8(buffer, REGISTER_COPPER_ADDR_INDEX);
-		buffer = write_char(buffer, ':');
-		buffer = write_u32 (buffer, get_copper_address(-1));
+		//buffer = write_u8(buffer, REGISTER_COPPER_ADDR_INDEX);
+		//buffer = write_char(buffer, ':');
+		//buffer = write_u32 (buffer, get_copper_address(-1));
 	}
+	//buffer = write_char(buffer, ';');
 	return buffer;
 }
 
 
-static bool send_exception (int processId, int threadId, bool detailed, bool send_now, bool isNotification) {
+/**
+ * Write a exception description in a reply buffer
+ * 
+ * @param process_id Process id
+ * @param thread_id Thread id
+ * @param detailed If true we will send a detailed message 'T', if false a standard message 'S'
+ * @param send_now If false the exception will be sent later in the process
+ * @param is_notification If true the message will be formated as a notification, with a name
+ * @return true if the response was sent without error
+ */
+static bool send_exception (int process_id, int thread_id, bool detailed, bool send_now, bool is_notification) {
 	if (processing_message && !send_now) {
 		// send is delayed
 		exception_send_pending = true;
-		exception_send_pending_pid = processId;
-		exception_send_pending_tid = threadId;
+		exception_send_pending_pid = process_id;
+		exception_send_pending_tid = thread_id;
 		if (log_remote_protocol_enabled) {
 			fs_log("[REMOTE_DEBUGGER] send exception delayed\n");
 		}
@@ -985,12 +1264,15 @@ static bool send_exception (int processId, int threadId, bool detailed, bool sen
 	// this function will just exit if already connected
 	rconn_update_listner(s_conn);
 
-	unsigned char messageBuffer[512] = { 0 };
-	uae_u8 *t = messageBuffer;
-	uae_u8 *buffer = write_exception (messageBuffer, processId, threadId, detailed, isNotification);
+	unsigned char message_buffer[512] = { 0 };
+	uae_u8 *t = message_buffer;
+	uae_u8 *buffer = write_exception (message_buffer, process_id, thread_id, detailed, is_notification);
     return send_packet_in_place(t, (int)((uintptr_t)buffer - (uintptr_t)t) - 1);
 }
 
+/**
+ * Callback to let the remote debugger check if there is an exception triggered
+ */
 void remote_debug_check_exception_ (void) {
 	int	nr = regs.exception;
 	if ((nr > 0) && debug_illegal && (nr <= 63) && (debug_illegal_mask & ((uae_u64)1 << nr)))
@@ -1005,10 +1287,17 @@ void remote_debug_check_exception_ (void) {
 	}
 }
 
-static bool step(int processId, int threadId)
+/**
+ * Step command
+ * 
+ * @param process_id Process id
+ * @param thread_id Thread id
+ * @return true if there is no error
+ */
+static bool step(int process_id, int thread_id)
 {
 	current_traceframe = DEFAULT_TRACEFRAME;
-	if (threadId == THREAD_ID_CPU) {
+	if (thread_id == THREAD_ID_CPU) {
 		// cpu step
 		set_special(SPCFLAG_BRK);
 		step_cpu = true;
@@ -1020,7 +1309,7 @@ static bool step(int processId, int threadId)
 			s_state = Tracing;
 
 		remote_activate_debugger ();
-	} else if (threadId == THREAD_ID_COP) {
+	} else if (thread_id == THREAD_ID_COP) {
 		// copper step
 		debug_copper = 1|2;
 		did_step_copper = true;
@@ -1030,9 +1319,16 @@ static bool step(int processId, int threadId)
 	return true;
 }
 
-static bool step_next_instruction (int processId, int threadId) {
+/**
+ * Step to the next instruction command
+ * 
+ * @param process_id Process id
+ * @param thread_id Thread id
+ * @return true if there is no error
+ */
+static bool step_next_instruction (int process_id, int thread_id) {
 	current_traceframe = DEFAULT_TRACEFRAME;
-	if (threadId == THREAD_ID_CPU) {
+	if (thread_id == THREAD_ID_CPU) {
 		uaecptr nextpc = 0;
 		uaecptr pc = m68k_getpc ();
 		m68k_disasm (pc, &nextpc, 0xffffffff, 1);
@@ -1049,7 +1345,7 @@ static bool step_next_instruction (int processId, int threadId) {
 
 		s_skip_to_pc = nextpc;
 		s_state = Running;
-	} else if (threadId == THREAD_ID_COP) {
+	} else if (thread_id == THREAD_ID_COP) {
 		// copper step
 		debug_copper = 1|2;
 		did_step_copper = true;
@@ -1058,18 +1354,19 @@ static bool step_next_instruction (int processId, int threadId) {
 	return true;
 }
 
-static void mem2hex(unsigned char* output, const unsigned char* input, int count)
-{
-	for (int i = 0; i < count; ++i)
-	{
-		unsigned char ch = *input++;
-		*output++ = s_hexchars[ch >> 4];
-		*output++ = s_hexchars[ch & 0xf];
-	}
-
-	*output = 0;
-}
-
+/**
+ * Handles a vRun command 
+ * ‘vRun;filename[;argument]…’
+ *   Run the program filename, passing it each argument on its command line. The file and arguments are hex-encoded strings. If filename is an empty string, the stub may use a default program (e.g. the last program run). The program is created in the stopped state.
+ *   This packet is only available in extended mode (see extended mode).
+ *   Reply:
+ *   ‘E nn’
+ *       for an error 
+ *   ‘Any stop packet’
+ *       for success (see Stop Reply Packets) 
+ * @param packet Containing the request
+ * @return true if the response was sent without error
+ */
 static bool handle_vrun (char* packet)
 {
 	// extract the args for vRun
@@ -1080,8 +1377,9 @@ static bool handle_vrun (char* packet)
 	}
 
 	if (pch) {
-		strcpy(s_exe_to_run, pch);
-		pch = strtok (0, pch);
+		// The filename is coded in ascii/hex
+		read_string(pch, s_exe_to_run, EXE_TO_RUN_BUFFER_SIZE);
+		pch = strtok (0, pch);		
 		fs_log("[REMOTE_DEBUGGER] exe to run %s\n", s_exe_to_run);
 	}
 
@@ -1097,22 +1395,40 @@ static bool handle_vrun (char* packet)
 	    fs_log("[REMOTE_DEBUGGER] %s:%d\n", __FILE__, __LINE__);
 	}
 
+	// adding the entry point breakpoint -> needed for the multi protocol of gdbserver
+	// The first instruction in an amiga program is at Seg 0 offset 0
+	set_offset_seg_breakpoint(0, 0);
+
 	fs_log("[REMOTE_DEBUGGER] running debugger_boot\n");
 
 	// TODO: Extract args
-	vRunCalled = true;
+	vrun_called = true;
 
+	// The return is sent a stop packet after the program launch.
 	return true;
 }
 
+/**
+ * Handles a QTFrame command 
+ * ! Partial implementation : Not real tracepoint implentation
+ *‘QTFrame:n’
+ *   Select the n’th tracepoint frame from the buffer, and use the register and memory contents recorded there to answer subsequent request packets from GDB.
+ *   A successful reply from the stub indicates that the stub has found the requested frame. The response is a series of parts, concatenated without separators, describing the frame we selected. Each part has one of the following forms:
+ *   ‘F f’
+ *       The selected frame is number n in the trace frame buffer; f is a hexadecimal number. If f is ‘-1’, then there was no frame matching the criteria in the request packet.
+ *   ‘T t’
+ *       The selected trace frame records a hit of tracepoint number t; t is a hexadecimal number.
+ * @param packet Containing the request
+ * @return true if the response was sent without error
+ */
 static bool handle_qtframe_packet(char *packet)
 {
 	uae_u32 frame, pc, lo, hi, num;
-	int tfnum, tpnum, tfnumFound;
+	int tfnum, tpnum, tfnum_found;
 	struct debugstackframe *tframe;
-	uae_u8 messageBuffer[50] = { 0 };
-	uae_u8 *buffer = messageBuffer;
-	uae_u8 *t = messageBuffer;
+	uae_u8 message_buffer[50] = { 0 };
+	uae_u8 *buffer = message_buffer;
+	uae_u8 *t = message_buffer;
 	*buffer++ = '$';
 
 	packet += strlen("QTFrame:");
@@ -1130,19 +1446,19 @@ static bool handle_qtframe_packet(char *packet)
 	if (log_remote_protocol_enabled) {
 		fs_log("[REMOTE_DEBUGGER] Want to look at traceframe %d", tfnum);
 	}
-	tframe = find_traceframe(false, tfnum, &tfnumFound);
+	tframe = find_traceframe(false, tfnum, &tfnum_found);
 	if (tframe)
 	{
 		current_traceframe = tfnum;
 		*buffer++ = 'F';
-		if (tfnumFound <= 0)
+		if (tfnum_found <= 0)
 		{
 			*buffer++ = '-';
 			*buffer++ = '1';
 		}
 		else 
 		{
-			buffer = write_u32 (buffer, tfnumFound);
+			buffer = write_u32 (buffer, tfnum_found);
 		}
 	}
 	else
@@ -1155,58 +1471,68 @@ static bool handle_qtframe_packet(char *packet)
 }
 
 
-//
-// Reponse to the qfThreadInfo
-// Reply:
-//     ‘m thread-id’
-//   A single thread ID 
-//		‘m thread-id,thread-id…’
-//   a comma-separated list of thread IDs 
-//		‘l’
-//
+/**
+ * Reponse to the qfThreadInfo
+ * Reply:
+ *     ‘m thread-id’
+ *   A single thread ID 
+ *		‘m thread-id,thread-id…’
+ *   a comma-separated list of thread IDs 
+ *		‘l’
+ * @param packet Containing the request
+ * @return true if the response was sent without error
+ */
 static bool handle_qfthreadinfo_packet(char *packet)
 {
-	uae_u8 messageBuffer[1024] = { 0 };
-	uae_u8 *buffer = messageBuffer;
-	uae_u8 *t = messageBuffer;
+	if (vrun_called) {
+		uae_u8 message_buffer[1024] = { 0 };
+		uae_u8 *buffer = message_buffer;
+		uae_u8 *t = message_buffer;
 
-	// TODO: activate with DMACON options
-	buffer = write_char(buffer, '$');
-	buffer = write_char(buffer, 'm');
-	buffer = write_threadId(buffer, PROCESS_ID_SYSTEM, THREAD_ID_COP);
-	buffer = write_char(buffer, ',');
-	buffer = write_threadId(buffer, PROCESS_ID_SYSTEM, THREAD_ID_CPU);
-	buffer = write_char(buffer, ',');
-	buffer = write_char(buffer, 'l'); // End of threads
+		// TODO: activate with DMACON options
+		buffer = write_char(buffer, '$');
+		buffer = write_char(buffer, 'm');
+		buffer = write_thread_id(buffer, PROCESS_ID_SYSTEM, THREAD_ID_CPU);
+		buffer = write_char(buffer, ',');
+		buffer = write_thread_id(buffer, PROCESS_ID_SYSTEM, THREAD_ID_COP);
 
-    return send_packet_in_place(t, (int)((uintptr_t)buffer - (uintptr_t)t) - 1);
+		return send_packet_in_place(t, (int)((uintptr_t)buffer - (uintptr_t)t) - 1);
+	} else {
+		return send_packet_string("l");
+	}
 }
 
 
-//
-// Handles the qSupported query
-// ‘qSupported [:gdbfeature [;gdbfeature]… ]’
-//	Response
-//   ‘stubfeature [;stubfeature]…’
-// ‘stubfeature format used :
-//		‘name=value’
-//			The remote protocol feature name is supported, and associated with the specified value. The format of value depends on the feature, but it must not include a semicolon. 
-//		‘name+’
-// 			The remote protocol feature name is supported, and does not need an associated value. 
-//   no response is equivalent to ‘name-’
+/**
+ * Handles the qSupported query
+ * ‘qSupported [:gdbfeature [;gdbfeature]… ]’
+ *	Response
+ *   ‘stubfeature [;stubfeature]…’
+ * ‘stubfeature format used :
+ *		‘name=value’
+ *			The remote protocol feature name is supported, and associated with the specified value. The format of value depends on the feature, but it must not include a semicolon. 
+ *		‘name+’
+ * 			The remote protocol feature name is supported, and does not need an associated value. 
+ *   no response is equivalent to ‘name-’
+ * @param packet Containing the request
+ * @return true if the response was sent without error
+ */
 static bool handle_qsupported_packet(char *packet)
 {
 	char *token;
-	uae_u8 messageBuffer[1024] = { 0 };
-	uae_u8 *buffer = messageBuffer;
-	uae_u8 *t = messageBuffer;
+	uae_u8 message_buffer[1024] = { 0 };
+	uae_u8 *buffer = message_buffer;
+	uae_u8 *t = message_buffer;
 
-	buffer = write_char(buffer, '$');
+	buffer = write_string(buffer, "$qSupported:");
 	buffer = write_string(buffer, "PacketSize=");
-	buffer = write_u32(buffer, 10240); // TODO: Add a real size .... not just 10kb
+	buffer = write_u32(buffer, PACKET_SIZE); // TODO: Add a real size .... not just 10kb
 	buffer = write_char(buffer, ';');
 
 	packet += strlen("qSupported");
+	if (*packet == ':') {
+		packet++;
+	}
 	// skip white spaces
 	while (*packet == ' ') {
 		packet++;
@@ -1215,114 +1541,314 @@ static bool handle_qsupported_packet(char *packet)
 	token = strtok(packet, ";");
 	/* walk through other tokens */
 	while (token != NULL) {
-		if (!strcmp ("QStartNoAckMode", token)) {
-			buffer = write_string(buffer, "QStartNoAckMode+");
-			buffer = write_char(buffer, ';');
-		} else if (!strcmp ("multiprocess", token)) {
-			buffer = write_string(buffer, "multiprocess+");
-			buffer = write_char(buffer, ';');
-		} else if (!strcmp ("vContSupported", token)) {
-			buffer = write_string(buffer, "vContSupported+");
-			buffer = write_char(buffer, ';');
-		} else if (!strcmp ("QNonStop", token)) {
-			buffer = write_string(buffer, "QNonStop+");
-			buffer = write_char(buffer, ';');
+		if (!strcmp ("multiprocess+", token)) {
+			support_multiprocess = true;
 		}
 		token = strtok(NULL, ";");
 	}
+	buffer = write_string(buffer, "QStartNoAckMode+;multiprocess+;vContSupported+;QThreadEvents+;QNonStop+;swbreak+;hwbreak+;QTFrame+");
     return send_packet_in_place(t, (int)((uintptr_t)buffer - (uintptr_t)t) - 1);
 }
 
+/**
+ * Handles the qC packet
+ *‘qC’
+ *   Return the current thread ID.
+ *   Reply:
+ *   ‘QC thread-id’
+ *       Where thread-id is a thread ID as documented in thread-id syntax. 
+ *   ‘(anything else)’
+ *       Any other reply implies the old thread ID.
+ * @return true if the response was sent without error
+ */
+static bool handle_qc_packet() {
+	uae_u8 message_buffer[1024] = { 0 };
+	uae_u8 *buffer = message_buffer;
+	uae_u8 *t = message_buffer;
+	buffer = write_char(buffer, '$');
+	buffer = write_string(buffer, "QC");
+	buffer = write_thread_id(buffer, PROCESS_ID_SYSTEM, THREAD_ID_CPU);
+	return send_packet_in_place(t, (int)((uintptr_t)buffer - (uintptr_t)t) - 1);
+}
 
+/**
+ * Handles the qAttached packet
+ *‘qAttached:pid’
+ *   Return an indication of whether the remote server attached to an existing process or created a new process. When the multiprocess protocol extensions are supported (see multiprocess extensions), pid is an integer in hexadecimal format identifying the target process. Otherwise, GDB will omit the pid field and the query packet will be simplified as ‘qAttached’.
+ *   This query is used, for example, to know whether the remote process should be detached or killed when a GDB session is ended with the quit command.
+ *   Reply:
+ *   ‘1’
+ *       The remote server attached to an existing process. 
+ *   ‘0’
+ *       The remote server created a new process. 
+ *   ‘E NN’
+ *       A badly formed request or an error was encountered. 
+ * @return true if the response was sent without error
+ */
+static bool handle_qattached() {
+	if (vrun_called) {
+		// process attached
+		return send_packet_string("1");
+	} else {
+		// new process created
+		return send_packet_string("0");
+	}
+}
+
+/**
+ * Handles the qOffsets packet
+ *‘qOffsets’
+ *   Get section offsets that the target used when relocating the downloaded image.
+ *   Reply:
+ *   ‘Text=xxx;Data=yyy[;Bss=zzz]’
+ *       Relocate the Text section by xxx from its original address. Relocate the Data section by yyy from its original address. If the object file format provides segment information (e.g. ELF ‘PT_LOAD’ program headers), GDB will relocate entire segments by the supplied offsets.
+ *       Note: while a Bss offset may be included in the response, GDB ignores this and instead applies the Data offset to the Bss section.
+ *   ‘TextSeg=xxx[;DataSeg=yyy]’
+ *       Relocate the first segment of the object file, which conventionally contains program code, to a starting address of xxx. If ‘DataSeg’ is specified, relocate the second segment, which conventionally contains modifiable data, to a starting address of yyy. GDB will report an error if the object file does not contain segment information, or does not contain at least as many segments as mentioned in the reply. Extra segments are kept at fixed offsets relative to the last relocated segment. 
+ * @return true if the response was sent without error
+ */
+static bool handle_qoffsets_packet() {
+	if (vrun_called) {
+		uae_u8 message_buffer[1024] = { 0 };
+		uae_u8 *buffer = message_buffer;
+		uae_u8 *t = message_buffer;
+		buffer = write_string(buffer, "$TextSeg=");
+		buffer = write_u32(buffer, s_segment_info[0].address);
+		if (s_segment_count > 1) {
+			buffer = write_string(buffer, ";DataSeg=");
+			buffer = write_u32(buffer, s_segment_info[1].address);
+		}
+		return send_packet_in_place(t, (int)((uintptr_t)buffer - (uintptr_t)t) - 1);
+	} else {
+		return send_packet_string("");
+	}
+}
+
+/**
+ * Handles the qTStatus packet
+ * Partial implementation : Not real tracepoint implentation
+ *‘qTStatus’
+ *   Ask the stub if there is a trace experiment running right now.
+ *   The reply has the form:
+ *   ‘Trunning[;field]…’
+ *       running is a single digit 1 if the trace is presently running, or 0 if not. It is followed by semicolon-separated optional fields that an agent may use to report additional status.
+ *   If the trace is not running, the agent may report any of several explanations as one of the optional fields:
+ *   ‘tnotrun:0’
+ *       No trace has been run yet.
+ * @return true if the response was sent without error
+ */
+static bool handle_qtstatus_packet() {
+	return send_packet_string("T1");
+}
+
+/**
+ * Handles the qTfV packet
+ * Partial implementation : Not real tracepoint implentation
+ *‘qTfV’
+ *‘qTsV’
+ *   These packets request data about trace state variables that are on the target. GDB sends qTfV to get the first vari of data, and multiple qTsV to get additional variables. Replies to these packets follow the syntax of the QTDV packets that define trace state variables.
+ * @return true if the response was sent without error
+ */
+static bool handle_qtfv() {
+	return send_packet_string("");
+}
+
+/**
+ * Handles a query packet
+ * 
+ * @param packet Containing the request
+ * @param length Length of the packet
+ * @return true if the response was sent without error
+ */
 static bool handle_query_packet(char* packet, int length)
 {
 	int i = 0;
 
 	// ‘v’ Packets starting with ‘v’ are identified by a multi-letter name, up to the first ‘;’ or ‘?’ (or the end of the packet).
 
-	for (i = 0; i < length; ++i)
-	{
-		const char c = packet[i];
-
-		if (c == ':' || c == '?' || c == '#')
-			break;
-	}
-
-	packet[i] = 0;
-
 	if (log_remote_protocol_enabled) {
 		fs_log("[REMOTE_DEBUGGER] [query] %s\n", packet);
 		fs_log("[REMOTE_DEBUGGER] handle_query_packet %d\n", __LINE__);
 	}
 
-	if (!strcmp ("QStartNoAckMode", packet)) {
+	if (!strncmp (packet, "QStartNoAckMode", 15)) {
 		need_ack = false;
 		return reply_ok ();
 	}
 	else if (!strncmp (packet, "qSupported", 10)) {
-		handle_qsupported_packet(packet);
+		return handle_qsupported_packet(packet);
 	}
-	else if (!strcmp (packet, "QTFrame")) {
-		handle_qtframe_packet(packet);
+	else if (!strncmp (packet, "QNonStop", 8)) {
+		return reply_ok ();
 	}
-	else if (!strcmp (packet, "qfThreadInfo")) {
-		handle_qfthreadinfo_packet(packet);
+	else if (!strncmp (packet, "QTFrame", 7)) {
+		return handle_qtframe_packet(packet);
 	}
-	else {
-		send_packet_string (ERROR_PACKET_NOT_SUPPORTED);
+	else if (!strncmp (packet, "qOffsets", 8)) {
+		return handle_qoffsets_packet();
 	}
-
+	else if (!strncmp (packet, "qTStatus", 8)) {
+		return handle_qtstatus_packet();
+	}
+	else if (!strncmp (packet, "qfThreadInfo", 12)) {
+		return handle_qfthreadinfo_packet(packet);
+	}
+	else if (!strncmp (packet, "qsThreadInfo", 12)) {
+		// end of threads
+		return send_packet_string("l");
+	}
+	else if (!strncmp (packet, "qC", 9)) {
+		// asks for current thread ID
+		return handle_qc_packet();
+	}
+	else if (!strncmp (packet, "qAttached", 9)) {
+		return handle_qattached();
+	}
+	else if (!strncmp (packet, "qTfV", 9)) {
+		return handle_qtfv();
+	}	
 	if (log_remote_protocol_enabled) {
 		fs_log("[REMOTE_DEBUGGER] handle_query_packet %d\n", __LINE__);
 	}
-
-	return true;
+	//send_packet_string (ERROR_PACKET_NOT_SUPPORTED);
+	// Not supported
+	return send_packet_string("");
 }
 
-static bool handle_thread ()
+/**
+ * Handles a Thread request packet
+ *‘H op thread-id’
+ *   Set thread for subsequent operations (‘m’, ‘M’, ‘g’, ‘G’, et.al.). Depending on the operation to be performed, op should be ‘c’ for step and continue operations (note that this is deprecated, supporting the ‘vCont’ command is a better option), and ‘g’ for other operations. The thread designator thread-id has the format and interpretation described in thread-id syntax.
+ *   Reply:
+ *   ‘OK’
+ *       for success 
+ *   ‘E NN’
+ *       for an error 
+ * @param packet Containing the request
+ * @param length Length of the packet
+ * @return true if the response was sent without error
+ */
+static bool handle_thread (char* packet, int length)
 {
-	send_packet_string ("OK");
-	return true;
+	if (length > 1) {
+		char command = packet[0];
+		int process_id = PROCESS_ID_SYSTEM;
+		int thread_id = THREAD_ID_CPU;
+		bool parse_error = false;
+		packet++;
+		if (support_multiprocess) {
+			int scan_res = sscanf (packet, "p%x.%x", &process_id, &thread_id);
+			parse_error =  (scan_res != 2);
+		} else {
+			int scan_res = sscanf (packet, "%x", &thread_id);
+			parse_error =  (scan_res != 1);
+		}
+		if (parse_error)	{
+			fs_log("[REMOTE_DEBUGGER] Error during thread command parse of thread id '%s'\n", packet);
+			return send_packet_string (ERROR_THREAD_COMMAND_PARSE);
+		}
+		switch (command) {
+			case 'g':
+			selected_thread_id = thread_id;
+			selected_process_id = process_id;
+			return reply_ok();
+			break;
+			default:
+			// not implemented
+			return send_packet_string (ERROR_PACKET_NOT_SUPPORTED);
+			break;
+		}
+	} else {
+		fs_log("[REMOTE_DEBUGGER] Error during thread command parse '%s'\n", packet);
+		return send_packet_string (ERROR_THREAD_COMMAND_PARSE);
+	}
 }
 
+/**
+ * Handles a vStopped or ? request
+ * ‘?’
+ *   Indicate the reason the target halted. The reply is the same as for step and continue. This packet has a special interpretation when the target is in non-stop mode; see Remote Non-Stop.
+ *   Reply: See Stop Reply Packets, for the reply specifications.
+ * 	See send_exception function for response details
+ * @return true if the response was sent without error
+ */
 static bool handle_vstopped ()
 {
-	bool exception_sent = false;
-	if (current_vStopped_idx == 0) {
-		exception_sent = send_exception (PROCESS_ID_SYSTEM, THREAD_ID_CPU, true, true, false);
-		current_vStopped_idx++;
-	} else if (current_vStopped_idx == 1) {
-		exception_sent = send_exception (PROCESS_ID_SYSTEM, THREAD_ID_COP, true, true, false);
-		current_vStopped_idx++;
+	if (vrun_called) {
+		bool exception_sent = false;
+		if (current_vstopped_idx == 0) {
+			exception_sent = send_exception (PROCESS_ID_SYSTEM, THREAD_ID_CPU, true, true, false);
+			current_vstopped_idx++;
+		} else if (current_vstopped_idx == 1) {
+			exception_sent = send_exception (PROCESS_ID_SYSTEM, THREAD_ID_COP, true, true, false);
+			current_vstopped_idx++;
+		} else {
+			reply_ok();
+			current_vstopped_idx = 0;
+			exception_sent= true;
+		}
+		return exception_sent;
 	} else {
-		send_packet_string ("OK");
-		current_vStopped_idx = 0;
-		exception_sent= true;
+		return send_packet_string("W00");
 	}
-	return exception_sent;
 }
 
+/**
+ * Handles ? request
+ * ‘?’
+ *   Indicate the reason the target halted. The reply is the same as for step and continue. This packet has a special interpretation when the target is in non-stop mode; see Remote Non-Stop.
+ *   Reply: See Stop Reply Packets, for the reply specifications.
+ * 	See send_exception function for response details
+ * @return true if the response was sent without error
+ */
 static bool handle_qmark ()
 {
 	// Abandonning vStopped reports
-	current_vStopped_idx = 0;
+	current_vstopped_idx = 0;
 	// Send first exception
 	return handle_vstopped ();
 }
 
+/**
+ * Handles extended mode request
+ * ‘!’
+ *   Enable extended mode. In extended mode, the remote server is made persistent. The ‘R’ packet is used to restart the program being debugged.
+ *   Reply:
+ *   ‘OK’
+ *       The remote target both supports and has enabled extended mode. 
+ * @return true if the response was sent without error
+ */
+static bool handle_extended_mode ()
+{
+	// Accepted
+	return reply_ok();
+}
+
+/**
+ * Kills the running program
+ * @return true if it was killed
+ */
 static bool kill_program () {
 	remote_deactivate_debugger ();
 	uae_reset (0, 0);
     s_segment_count = 0;
-
 	return true;
 }
 
-
-static bool continue_exec (int processId, int threadId, char* packet)
+/**
+ * Handles continue reques
+ *‘c [addr]’
+ *   Continue at addr, which is the address to resume. If addr is omitted, resume at current address.
+ *   This packet is deprecated for multi-threading support. See vCont packet.
+ *   Reply: See Stop Reply Packets, for the reply specifications.
+ * @param process_id Process id
+ * @param thread_id Thread id
+ * @param packet Request packet
+ * @return true if the response was sent without error
+ */
+static bool handle_continue_exec (int process_id, int thread_id, char* packet)
 {
 	// 'c [addr] Continue at addr, which is the address to resume. If addr is omitted, resume at current address.
-
 	if ((packet != NULL) && (*packet != '#'))
 	{
 		uae_u32 address;
@@ -1336,10 +1862,15 @@ static bool continue_exec (int processId, int threadId, char* packet)
 	fs_log("[REMOTE_DEBUGGER] remote_debug: continue execution...\n");
 	debug_copper = 1|4;
 	remote_deactivate_debugger ();
-	reply_ok ();	
-	return true;
+	return reply_ok ();
 }
 
+/**
+ * Checks if the address has a breakpoint attached
+ * 
+ * @param address Address tested
+ * @return Index of the breakpoint or -1
+ */
 static int has_breakpoint_address(uaecptr address)
 {
 	for (int i = 0; i < s_breakpoint_count; ++i)
@@ -1347,52 +1878,74 @@ static int has_breakpoint_address(uaecptr address)
 		if (s_breakpoints[i].address == address)
 			return i;
 	}
-
 	return -1;
 }
 
+/**
+ * Resolves the address of a breakpoint.
+ * Transforms from seg/offset to absolute momory address
+ * 
+ * @param breakpoint Breakpoint to process
+ */
 static void resolve_breakpoint_seg_offset (Breakpoint* breakpoint)
 {
-    uae_u32 segId = breakpoint->kind;
+    uae_u32 seg_id = breakpoint->kind;
     uaecptr offset = breakpoint->offset;
 
-    if (segId >= s_segment_count) {
+    if (seg_id >= s_segment_count) {
 		if (log_remote_protocol_enabled) {
-			fs_log("[REMOTE_DEBUGGER] Segment id >= segment_count (%d - %d)\n", segId, s_segment_count);
+			fs_log("[REMOTE_DEBUGGER] Segment id >= segment_count (%d - %d)\n", seg_id, s_segment_count);
 		}
 		breakpoint->needs_resolve = true;
 		return;
     } else  {
-		breakpoint->seg_id = segId;
-    	breakpoint->address = s_segment_info[segId].address + offset;
+		breakpoint->seg_id = seg_id;
+    	breakpoint->address = s_segment_info[seg_id].address + offset;
 	}
     breakpoint->needs_resolve = false;
 	if (log_remote_protocol_enabled) {
-	    fs_log("[REMOTE_DEBUGGER] resolved breakpoint (%x - %x) -> 0x%08x\n", offset, segId, breakpoint->address);
+	    fs_log("[REMOTE_DEBUGGER] resolved breakpoint (%x - %x) -> 0x%08x\n", offset, seg_id, breakpoint->address);
 	}
 }
 
-static bool set_offset_seg_breakpoint (uaecptr offset, uae_u32 kind)
+/**
+ * Adds an offset/seg breakpoint
+ * 
+ * @param offset Offset in code segment
+ * @param kind Kind of breakpoint
+ */
+static void set_offset_seg_breakpoint (uaecptr offset, uae_u32 kind)
 {
 	s_breakpoints[s_breakpoint_count].offset = offset;
 	s_breakpoints[s_breakpoint_count].kind = kind;
     resolve_breakpoint_seg_offset (&s_breakpoints[s_breakpoint_count]);
 	s_breakpoint_count++;
-    return reply_ok ();
 }
 
-static bool set_absolute_address_breakpoint (uaecptr offset)
+/**
+ * Adds an absolute address breakpoint
+ * 
+ * @param address Absolute address
+ */
+static bool set_absolute_address_breakpoint (uaecptr address)
 {
 	if (log_remote_protocol_enabled) {
-		fs_log("[REMOTE_DEBUGGER] Added absolute address breakpoint at 0x%08x \n", offset);
+		fs_log("[REMOTE_DEBUGGER] Added absolute address breakpoint at 0x%08x \n", address);
 	}
-	s_breakpoints[s_breakpoint_count].address = offset;
+	s_breakpoints[s_breakpoint_count].address = address;
 	s_breakpoints[s_breakpoint_count].kind = BREAKPOINT_KIND_ABSOLUTE_ADDR;
 	s_breakpoints[s_breakpoint_count].needs_resolve = false;
 	s_breakpoint_count++;
 	return reply_ok ();
 }
 
+/**
+ * Removes a breakpoint
+ * 
+ * @param offset offset or address
+ * @param kind Kid of breakpoint
+ * @return true if it was removed
+ */
 static bool remove_breakpoint (uaecptr offset, uae_u32 kind) 
 {
 	for (int i = 0; i < s_breakpoint_count; ++i) {
@@ -1406,7 +1959,15 @@ static bool remove_breakpoint (uaecptr offset, uae_u32 kind)
 	return reply_ok ();
 }
 
-static bool set_breakpoint_address (char* packet, int add)
+
+/**
+ * Handles set breakpoint request for an address
+ * see handle_set_breakpoint
+ * @param packet Packet of the request
+ * @param add If true it's a add, if not it's a remove request
+ * @return true if the response was sent without error
+ */
+static bool handle_set_breakpoint_address (char* packet, bool add)
 {
 	uaecptr offset;
 	uae_u32 kind = BREAKPOINT_KIND_ABSOLUTE_ADDR;
@@ -1442,16 +2003,23 @@ static bool set_breakpoint_address (char* packet, int add)
 		send_packet_string (ERROR_UNKNOWN_BREAKPOINT_KIND);
 		return false;
 	} else if (kind <= BREAKPOINT_KIND_SEG_ID_MAX) {
-		return set_offset_seg_breakpoint (offset, kind);
+		set_offset_seg_breakpoint (offset, kind);
+		return reply_ok ();
     } else {
 		return set_absolute_address_breakpoint (offset);
     }
 }
 
-// The message is z1,0,0;Xf,nnnnnnnnnnnnnnnn
-//  address is 0 : not used
-//  One parameter with 16 chars is the 64bit mask for exception filtering
-static bool set_exception_breakpoint (char* packet, int add) {
+/**
+ * Handles set breakpoint request for an exception
+ * The message is z1,0,0;Xf,nnnnnnnnnnnnnnnn
+ *  address is 0 : not used
+ *  One parameter with 16 chars is the 64bit mask for exception filtering
+ * @param packet Packet of the request
+ * @param add If true it's a add, if not it's a remove request
+ * @return true if the response was sent without error
+ */
+static bool handle_set_exception_breakpoint (char* packet, bool add) {
 	if (add < 1) {
 		if (log_remote_protocol_enabled) {
 			fs_log("[REMOTE_DEBUGGER] Disabling exception debugging\n");
@@ -1483,7 +2051,37 @@ static bool set_exception_breakpoint (char* packet, int add) {
 	}
 }
 
-static bool set_breakpoint (char* packet, int add)
+/**
+ * Handles set breakpoint request
+ *‘z type,addr,kind’
+ *‘Z type,addr,kind’
+ *   Insert (‘Z’) or remove (‘z’) a type breakpoint or watchpoint starting at address address of kind kind.
+ *   Each breakpoint and watchpoint packet type is documented separately.
+ *   Implementation notes: A remote target shall return an empty string for an unrecognized breakpoint or watchpoint packet type. A remote target shall support either both or neither of a given ‘Ztype…’ and ‘ztype…’ packet pair. To avoid potential problems with duplicate packets, the operations should be implemented in an idempotent way.
+ *‘z0,addr,kind’
+ *‘Z0,addr,kind[;cond_list…][;cmds:persist,cmd_list…]’
+ *   Insert (‘Z0’) or remove (‘z0’) a software breakpoint at address addr of type kind.
+ *   A software breakpoint is implemented by replacing the instruction at addr with a software breakpoint or trap instruction. The kind is target-specific and typically indicates the size of the breakpoint in bytes that should be inserted. E.g., the ARM and MIPS can insert either a 2 or 4 byte breakpoint. Some architectures have additional meanings for kind (see Architecture-Specific Protocol Details); if no architecture-specific value is being used, it should be ‘0’. kind is hex-encoded. cond_list is an optional list of conditional expressions in bytecode form that should be evaluated on the target’s side. These are the conditions that should be taken into consideration when deciding if the breakpoint trigger should be reported back to GDB.
+ *   See also the ‘swbreak’ stop reason (see swbreak stop reason) for how to best report a software breakpoint event to GDB.
+ *   The cond_list parameter is comprised of a series of expressions, concatenated without separators. Each expression has the following form:
+ *   ‘X len,expr’
+ *       len is the length of the bytecode expression and expr is the actual conditional expression in bytecode form.
+ *   The optional cmd_list parameter introduces commands that may be run on the target, rather than being reported back to GDB. The parameter starts with a numeric flag persist; if the flag is nonzero, then the breakpoint may remain active and the commands continue to be run even when GDB disconnects from the target. Following this flag is a series of expressions concatenated with no separators. Each expression has the following form:
+ *   ‘X len,expr’
+ *       len is the length of the bytecode expression and expr is the actual commands expression in bytecode form.
+ *   Implementation note: It is possible for a target to copy or move code that contains software breakpoints (e.g., when implementing overlays). The behavior of this packet, in the presence of such a target, is not defined.
+ *   Reply:
+ *   ‘OK’
+ *       success 
+ *   ‘’
+ *       not supported 
+ *   ‘E NN’
+ *       for an error 
+ * @param packet Packet of the request
+ * @param add If true it's a add, if not it's a remove request
+ * @return true if the response was sent without error
+ */
+static bool handle_set_breakpoint (char* packet, bool add)
 {
 	switch (*packet)
 	{
@@ -1491,13 +2089,13 @@ static bool set_breakpoint (char* packet, int add)
 		{
 			// software breakpoint
 			// skip zero and  ,
-			return set_breakpoint_address(packet + 2, add);
+			return handle_set_breakpoint_address(packet + 2, add);
 		}
 		case '1' :
 		{
 			// Hardware breakpoint : used for exception breakpoint
 			// skip 1 and  ,
-			return set_exception_breakpoint(packet + 2, add);
+			return handle_set_exception_breakpoint(packet + 2, add);
 		}
 		default:
 		{
@@ -1508,14 +2106,21 @@ static bool set_breakpoint (char* packet, int add)
 	}
 }
 
-static bool pause_exec(int processId, int threadId) {
-	if (threadId == THREAD_ID_CPU) {
+/**
+ * Pause process execution
+ * 
+ * @param process_id Process id
+ * @param thread_id Thread id
+ * @return true if it was done
+ */
+static bool pause_exec(int process_id, int thread_id) {
+	if (thread_id == THREAD_ID_CPU) {
 		set_special (SPCFLAG_BRK);
-	} else if (threadId == THREAD_ID_COP) {
+	} else if (thread_id == THREAD_ID_COP) {
 		// Stop the copper
 		debug_copper = 1|2;
 	}
-	send_exception (processId, threadId, true, false, false);
+	send_exception (process_id, thread_id, true, true, false);
 	if (log_remote_protocol_enabled) {
 		fs_log("[REMOTE_DEBUGGER] pause demanded -> switching to tracing\n");
 	}
@@ -1523,6 +2128,36 @@ static bool pause_exec(int processId, int threadId) {
 	return true;
 }
 
+
+/**
+ * Handles vCont request
+ *‘vCont[;action[:thread-id]]…’
+ *   Resume the inferior, specifying different actions for each thread.
+ *   For each inferior thread, the leftmost action with a matching thread-id is applied. Threads that don’t match any action remain in their current state. Thread IDs are specified using the syntax described in thread-id syntax. If multiprocess extensions (see multiprocess extensions) are supported, actions can be specified to match all threads in a process by using the ‘ppid.-1’ form of the thread-id. An action with no thread-id matches all threads. Specifying no actions is an error.
+ *   Currently supported actions are:
+ *   ‘c’
+ *       Continue. 
+ *   ‘C sig’
+ *       Continue with signal sig. The signal sig should be two hex digits. 
+ *   ‘s’
+ *       Step. 
+ *   ‘S sig’
+ *       Step with signal sig. The signal sig should be two hex digits. 
+ *   ‘t’
+ *       Stop. 
+ *   ‘r start,end’
+ *       Step once, and then keep stepping as long as the thread stops at addresses between start (inclusive) and end (exclusive). The remote stub reports a stop reply when either the thread goes out of the range or is stopped due to an unrelated reason, such as hitting a breakpoint. See range stepping.
+ *       If the range is empty (start == end), then the action becomes equivalent to the ‘s’ action. In other words, single-step once, and report the stop (even if the stepped instruction jumps to start).
+ *       (A stop reply may be sent at any point even if the PC is still within the stepping range; for example, it is valid to implement this packet in a degenerate way as a single instruction step operation.)
+ *   The optional argument addr normally associated with the ‘c’, ‘C’, ‘s’, and ‘S’ packets is not supported in ‘vCont’.
+ *   The ‘t’ action is only relevant in non-stop mode (see Remote Non-Stop) and may be ignored by the stub otherwise. A stop reply should be generated for any affected thread not already stopped. When a thread is stopped by means of a ‘t’ action, the corresponding stop reply should indicate that the thread has stopped with signal ‘0’, regardless of whether the target uses some other signal as an implementation detail.
+ *   The server must ignore ‘c’, ‘C’, ‘s’, ‘S’, and ‘r’ actions for threads that are already running. Conversely, the server must ignore ‘t’ actions for threads that are already stopped.
+ *   Note: In non-stop mode, a thread is considered running until GDB acknowleges an asynchronous stop notification for it with the ‘vStopped’ packet (see Remote Non-Stop).
+ *   The stub must support ‘vCont’ if it reports support for multiprocess extensions (see multiprocess extensions).
+ *   Reply: See Stop Reply Packets, for the reply specifications.
+ * @param packet Recieved packet
+ * @return true if the response was sent without error
+ */
 static bool handle_vcont (char* packet)
 {
 	char *token;
@@ -1531,67 +2166,69 @@ static bool handle_vcont (char* packet)
 	/* walk through other commands */
 	while (token != NULL) {
 		// has thread id ?
-		char commandBuffer[2] = {0};
+		char command_buffer[4] = {0};
 		char command = token[0];
-		int processId = PROCESS_ID_SYSTEM;
-		int threadId = THREAD_ID_CPU;
-		int startAddress = -2;
-		int endAddress = -2;
-		bool hasThreadId = false;
-		bool parseError = false;
+		int process_id = PROCESS_ID_SYSTEM;
+		int thread_id = THREAD_ID_CPU;
+		int start_address = -2;
+		int end_address = -2;
+		bool has_thread_id = false;
+		bool parse_error = false;
 		for (int i = 0; i< strlen(token); i++) {
 			if (token[i] == ':') {
-				hasThreadId = true;
+				has_thread_id = true;
 				break;
 			}
 		}
-		if (hasThreadId) {
+		if (has_thread_id) {
 			if (command == 'r') {
 				// extract thread id
 				if (support_multiprocess) {
-					int scan_res = sscanf (token, "r%x,%x:%x.%x", &startAddress, &endAddress, &processId, &threadId);
-					parseError =  (scan_res != 4);
+					int scan_res = sscanf (token, "r%x,%x:p%x.%x", &start_address, &end_address, &process_id, &thread_id);
+					parse_error =  (scan_res != 4);
 				} else {
-					int scan_res = sscanf (token, "r%x,%x:%x", &startAddress, &endAddress, &threadId);
-					parseError =  (scan_res != 3);
+					int scan_res = sscanf (token, "r%x,%x:%x", &start_address, &end_address, &thread_id);
+					parse_error =  (scan_res != 3);
 				}
 			} else {
 				// extract thread id
 				if (support_multiprocess) {
-					int scan_res = sscanf (token, "%c:%x.%x", commandBuffer, &processId, &threadId);
-					parseError =  (scan_res != 3);
+					int scan_res = sscanf (token, "%3[^:]:p%x.%x", command_buffer, &process_id, &thread_id);
+					parse_error =  (scan_res != 3);
 				} else {
-					int scan_res = sscanf (token, "%c:%x", commandBuffer, &threadId);
-					parseError =  (scan_res != 2);
+					int scan_res = sscanf (token, "%3[^:]:%x", command_buffer, &thread_id);
+					parse_error =  (scan_res != 2);
 				}
 			}
 		} else if (command == 'r') {
 			// extract thread id
-			int scan_res = sscanf (token, "r%x,%x", &startAddress, &endAddress);
-			parseError =  (scan_res != 2);
+			int scan_res = sscanf (token, "r%x,%x", &start_address, &end_address);
+			parse_error =  (scan_res != 2);
 		}
-		if (parseError)	{
+		if (parse_error)	{
 			fs_log("[REMOTE_DEBUGGER] Error during vCont command parse '%s'\n", token);
 			send_packet_string (ERROR_VCONT_PARSE);
 			return false;
 		}
 		switch (command) {
 			case 's':
+			case 'S':
 			// step
-			return step(processId, threadId);
+			return step(process_id, thread_id);
 			break;
 			case 't':
 			// stop
-			return pause_exec(processId, threadId);
+			return pause_exec(process_id, thread_id);
 			break;
 			case 'c':
+			case 'C':
 			// continue
-			return continue_exec(processId, threadId, NULL);
+			return handle_continue_exec(process_id, thread_id, NULL);
 			break;
 			case 'r':
 			// step range
-			// TODO: use startAddress and endAddress
-			return step_next_instruction(processId, threadId);
+			// TODO: use start_address and end_address
+			return step_next_instruction(process_id, thread_id);
 			break;
 			default:
 			// not implemented
@@ -1604,15 +2241,64 @@ static bool handle_vcont (char* packet)
 	return false;
 }
 
-static bool handle_vcont_query (char* packet)
+/**
+ * Handles vCont?
+ *‘vCont?’
+ *   Request a list of actions supported by the ‘vCont’ packet.
+ *   Reply:
+ *   ‘vCont[;action…]’
+ *       The ‘vCont’ packet is supported. Each action is a supported command in the ‘vCont’ packet. 
+ *   ‘’
+ *       The ‘vCont’ packet is not supported. 
+ * @return true if the response was sent without error
+ */
+static bool handle_vcont_query ()
 {
-	uae_u8 messageBuffer[20] = { 0 };
-	uae_u8 *buffer = messageBuffer;
-	uae_u8 *t = messageBuffer;
-	buffer = write_string(buffer, "vCont;c;s;t");
-    return send_packet_in_place(t, (int)((uintptr_t)buffer - (uintptr_t)t) - 1);
+	return send_packet_string ("vCont;c;C;s;S;t;r");
 }
 
+/**
+ * Handles thread break
+ * ‘vCtrlC’
+ *   Interrupt remote target as if a control-C was pressed on the remote terminal. This is the equivalent to reacting to the ^C (‘\003’, the control-C character) character in all-stop mode while the target is running, except this works in non-stop mode. See interrupting remote targets, for more info on the all-stop variant.
+ *   Reply:
+ *   ‘E nn’
+ *       for an error 
+ *   ‘OK’
+ *       for success 
+ * @return true if the response was sent without error
+ */
+static bool handle_vctrlc()
+{
+	return pause_exec(PROCESS_ID_SYSTEM, THREAD_ID_CPU);
+}
+
+/**
+ * Handles thread break
+ *‘D’
+ *‘D;pid’
+ *   The first form of the packet is used to detach GDB from the remote system. It is sent to the remote target before GDB disconnects via the detach command.
+ *   The second form, including a process ID, is used when multiprocess protocol extensions are enabled (see multiprocess extensions), to detach only a specific process. The pid is specified as a big-endian hex string.
+ *   Reply:
+ *   ‘OK’
+ *       for success 
+ *   ‘E NN’
+ *       for an error 
+ * @return true if the response was sent without error
+ */
+static bool handle_detach()
+{
+	// Stop debugging
+	return handle_continue_exec(PROCESS_ID_SYSTEM, THREAD_ID_CPU, NULL);
+}
+
+/**
+ * Removes the checksum from a request packet
+ * Adds a '\0' at the end
+ * @param packet Packet to process
+ * @param length Length of the packet
+ * @return Resulting length
+ */
 static int remove_checksum(char* packet, int length) {
 	for (int i = length; i > 0; --i) {
 		const char c = packet[i];
@@ -1624,6 +2310,14 @@ static int remove_checksum(char* packet, int length) {
 	return length;
 }
 
+
+/**
+ * Handles a multi-letter packet
+ * 
+ * @param packet Packet to process
+ * @param length Length of the packet
+ * @return true if the response was sent without error
+ */
 static bool handle_multi_letter_packet (char* packet, int length)
 {
 	int i = 0;
@@ -1633,13 +2327,19 @@ static bool handle_multi_letter_packet (char* packet, int length)
 	if (!strncmp(packet, "vCont;", 6)) {
 		return handle_vcont (packet + 6);
 	} else if (!strncmp(packet, "vCtrlC", 6)) {
-		return pause_exec(PROCESS_ID_SYSTEM, THREAD_ID_CPU);
+		return handle_vctrlc();
 	} else if (!strncmp(packet, "vRun", 4)) {
 		return handle_vrun (packet + 5);
 	} else if (!strncmp(packet, "vStopped", 8)) {
 		return handle_vstopped ();
 	} else if (!strncmp(packet, "vCont?", 6)) {
-		return handle_vcont_query (packet + 6);
+		return handle_vcont_query();
+	} else if (!strncmp(packet, "vMustReplyEmpty", 15)) {
+		return send_packet_string("");
+	} else if (!strncmp(packet, "vKill", 5)) {
+		// TODO: really kill the program
+		//kill_program ();
+		return reply_ok();
 	} else {
 		fs_log("[REMOTE_DEBUGGER] Multi letter packet not supported '%s'\n", packet);
 		send_packet_string (ERROR_PACKET_NOT_SUPPORTED);
@@ -1648,7 +2348,14 @@ static bool handle_multi_letter_packet (char* packet, int length)
 	return false;
 }
 
-static bool handle_packet(char* packet, int initialLength)
+/**
+ * Handles a request packet
+ * 
+ * @param packet Packet to process
+ * @param initial_length initial length of the packet
+ * @return true if the response was sent without error
+ */
+static bool handle_packet(char* packet, int initial_length)
 {
 	const char command = *packet;
 
@@ -1656,7 +2363,7 @@ static bool handle_packet(char* packet, int initialLength)
 		fs_log("[REMOTE_DEBUGGER] handle packet %s\n", packet);
 	}
 
-	int length = remove_checksum(packet, initialLength);
+	int length = remove_checksum(packet, initial_length);
 
 	// ‘v’ Packets starting with ‘v’ are identified by a multi-letter name, up to the first ‘;’ or ‘?’ (or the end of the packet).
 
@@ -1671,17 +2378,19 @@ static bool handle_packet(char* packet, int initialLength)
 		case 'g' : return send_registers ();
 		case 's' : return step (PROCESS_ID_SYSTEM, THREAD_ID_CPU);
 		case 'n' : return step_next_instruction (PROCESS_ID_SYSTEM, THREAD_ID_CPU);
-		case 'H' : return handle_thread ();
-		case 'G' : return set_registers ((const uae_u8*)packet + 1);
+		case 'H' : return handle_thread (packet + 1, length - 1);
+		case 'G' : return handle_set_registers ((const uae_u8*)packet + 1);
 		case '?' : return handle_qmark ();
+		case '!' : return handle_extended_mode ();
 		case 'k' : return kill_program ();
-		case 'm' : return send_memory (packet + 1);
-		case 'M' : return set_memory (packet + 1, length - 1);
-		case 'p' : return get_register (packet + 1, length - 1);
-		case 'P' : return set_register (packet + 1, length - 1);
-		case 'c' : return continue_exec (PROCESS_ID_SYSTEM, THREAD_ID_CPU, packet + 1);
-		case 'Z' : return set_breakpoint (packet + 1, 1);
-		case 'z' : return set_breakpoint (packet + 1, 0);
+		case 'm' : return handle_read_memory (packet + 1);
+		case 'M' : return handle_set_memory (packet + 1, length - 1);
+		case 'p' : return handle_get_register (packet + 1, length - 1);
+		case 'P' : return handle_set_register (packet + 1, length - 1);
+		case 'c' : return handle_continue_exec (PROCESS_ID_SYSTEM, THREAD_ID_CPU, packet + 1);
+		case 'D' : return handle_detach();
+		case 'Z' : return handle_set_breakpoint (packet + 1, true);
+		case 'z' : return handle_set_breakpoint (packet + 1, false);
 
 		default : send_packet_string (ERROR_PACKET_NOT_SUPPORTED);
 	}
@@ -1689,6 +2398,13 @@ static bool handle_packet(char* packet, int initialLength)
 	return false;
 }
 
+/**
+ * Parses a request packet
+ * 
+ * @param packet Packet to process
+ * @param size Length of the packet
+ * @return true if the response was sent without error
+ */
 static bool parse_packet(char* packet, int size)
 {
 	uae_u8 calc_checksum = 0;
@@ -1699,16 +2415,21 @@ static bool parse_packet(char* packet, int size)
 		fs_log("[REMOTE_DEBUGGER] parsing packet %s\n", packet);
 	}
 
+	if (*packet == 3 && size == 1)
+	{
+		// interrupt signal
+		return handle_vctrlc();
+	}
 	/*
 	if (*packet == '-' && size == 1)
 	{
 		fs_log("[REMOTE_DEBUGGER] *** Resending\n");
-		rconn_send (s_conn, s_lastSent, s_lastSize, 0);
+		rconn_send (s_conn, s_last_sent, s_last_size, 0);
 		return true;
 	}
 	*/
 
-	// TODO: Do we need to handle data that strides several packtes?
+	// TODO: Do we need to handle data that strides several packets?
 
 	if ((start = find_marker(packet, 0, '$', size)) == -1)
 		return false;
@@ -1751,6 +2472,10 @@ static bool parse_packet(char* packet, int size)
 }
 
 
+/**
+ * Updates a connection status
+ * 
+ */
 static void update_connection (void)
 {
 	if (is_quiting())
@@ -1787,8 +2512,11 @@ static void update_connection (void)
 	}
 }
 
-// Main function that will be called when doing the actual debugging
 
+/**
+ * Main function that will be called when doing the actual debugging
+ * 
+ */
 static void remote_debug_ (void)
 {
 	bool step_exception_sent = false;
@@ -1923,8 +2651,9 @@ static void remote_debug_ (void)
 	}
 }
 
-// Main function that will be called when doing the copper debugging
-
+/** 
+ * Main function that will be called when doing the copper debugging
+ */
 static void remote_debug_copper_ (uaecptr addr, uae_u16 word1, uae_u16 word2, int hpos, int vpos)
 {
 	// scan breakpoints for the current address
@@ -1932,8 +2661,8 @@ static void remote_debug_copper_ (uaecptr addr, uae_u16 word1, uae_u16 word2, in
 		for (int i = 0; i < s_breakpoint_count; ++i)
 		{
 			Breakpoint bp = s_breakpoints[i];
-			uaecptr realAddr = get_copper_address(-1);
-			if (!bp.needs_resolve && realAddr >= bp.address && realAddr <= bp.address + 3) {
+			uaecptr real_addr = get_copper_address(-1);
+			if (!bp.needs_resolve && real_addr >= bp.address && real_addr <= bp.address + 3) {
 				debug_copper = 1|8;
 				remote_activate_debugger ();
 				send_exception (PROCESS_ID_SYSTEM, THREAD_ID_COP, true, true, true);
@@ -1957,8 +2686,9 @@ static void remote_debug_copper_ (uaecptr addr, uae_u16 word1, uae_u16 word2, in
 	}
 }
 
-// This function needs to be called at regular interval to keep the socket connection alive
-
+/**
+ * This function needs to be called at regular interval to keep the socket connection alive
+ */
 static void remote_debug_update_ (void)
 {
 	if (!s_conn)
@@ -1974,30 +2704,33 @@ static void remote_debug_update_ (void)
 		remote_activate_debugger ();
 		//exception_debugging = 0;
 	}
-	if (vRunCalled) {
-		vRunCalled = !debugger_boot();
+	if (vrun_called && !debugger_boot_done) {
+		debugger_boot_done = debugger_boot();
 	}
 }
 
 extern uaecptr get_base (const uae_char *name, int offset);
 
-// Called from debugger_helper. At this point CreateProcess has been called
-// and we are resposible for filling out the data needed by the "RunCommand"
-// that looks like this:
-//
-//    rc = RunCommand(seglist, stacksize, argptr, argsize)
-//    D0		D1	   D2	    D3	    D4
-//
-//    LONG RunCommand(BPTR, ULONG, STRPTR, ULONG)
-//
-// For Kickstart under 2.0 - we use CreateProc
-//    process = CreateProc( name, pri, seglist, stackSize )
-//    D0                    D1    D2   D3       D4
-//
-//    struct MsgPort *CreateProc(STRPTR, LONG, BPTR, LONG)
+/**
+ * Called from debugger_helper. At this point CreateProcess has been called
+ * and we are resposible for filling out the data needed by the "RunCommand"
+ * that looks like this:
+ *
+ *    rc = RunCommand(seglist, stacksize, argptr, argsize)
+ *    D0		D1	   D2	    D3	    D4
+ *
+ *    LONG RunCommand(BPTR, ULONG, STRPTR, ULONG)
+ *
+ * For Kickstart under 2.0 - we use CreateProc
+ *    process = CreateProc( name, pri, seglist, stackSize )
+ *    D0                    D1    D2   D3       D4
+ *
+ *   struct MsgPort *CreateProc(STRPTR, LONG, BPTR, LONG)
+ * @param context Context of trap execution
+ */
 void remote_debug_start_executable (struct TrapContext *context)
 {
-	bool useCreateProc = kickstart_version && kickstart_version < 36;
+	bool use_create_proc = kickstart_version && kickstart_version < 36;
 #ifdef FSUAE
 	uaecptr filename = ds (s_exe_to_run);
 	uaecptr args = ds ("");
@@ -2039,6 +2772,7 @@ void remote_debug_start_executable (struct TrapContext *context)
 
     if (segs == 0) {
 		fs_log("[REMOTE_DEBUGGER] Unable to load segs\n");
+		send_packet_string(ERROR_UNABLE_LOAD_SEGMENTS);
 		return;
 	}
 
@@ -2046,16 +2780,12 @@ void remote_debug_start_executable (struct TrapContext *context)
 		fs_log("[REMOTE_DEBUGGER] About to send segments\n");
 	}
 
-	char buffer[1024] = { 0 };
-	strcpy(buffer, "AS");
-
 	s_segment_count = 0;
 
 	uae_u32 ptr = seglist_addr;
 	while(ptr != 0) {
-		char temp[64];
-		unsigned char addrStrTemp[9] = { 0 };
-		unsigned char sizeStrTemp[9] = { 0 };
+		unsigned char addr_str_temp[9] = { 0 };
+		unsigned char size_str_temp[9] = { 0 };
 
 		uae_u32 size = get_long(ptr - 4) - 8; // size of BPTR + segment
 		uae_u32 addr = ptr + 4;
@@ -2063,10 +2793,8 @@ void remote_debug_start_executable (struct TrapContext *context)
 		s_segment_info[s_segment_count].address = addr;
 		s_segment_info[s_segment_count].size = size;
 
-		write_u32(addrStrTemp, addr);
-		write_u32(sizeStrTemp, size);
-		sprintf(temp, ";%s;%s", addrStrTemp, sizeStrTemp);
-		strcat(buffer, temp);
+		write_u32(addr_str_temp, addr);
+		write_u32(size_str_temp, size);
 
 		s_segment_count++;
 
@@ -2086,14 +2814,8 @@ void remote_debug_start_executable (struct TrapContext *context)
 		resolve_breakpoint_seg_offset (bp);
 	}
 
-	send_packet_string (buffer);
-
-	if (log_remote_protocol_enabled) {
-		fs_log("[REMOTE_DEBUGGER] segs to send back %s\n", buffer);
-	}
-
 	context_set_areg(context, 6, dosbase);
-	if (useCreateProc) {
+	if (use_create_proc) {
 		context_set_dreg(context, 1, procname); // proc name
 		context_set_dreg(context, 2, 128); // priority
 		context_set_dreg(context, 3, segs);
@@ -2111,12 +2833,15 @@ void remote_debug_start_executable (struct TrapContext *context)
 	fs_log("[REMOTE_DEBUGGER] remote_debug_start_executable\n");
 }
 
+/**
+ * Send notification of program end
+ * 
+ * @param context Context of trap execution
+ */
 void remote_debug_end_executable (struct TrapContext *context)
 {
 	fs_log("[REMOTE_DEBUGGER] remote_debug_end_executable\n");
-	char buffer[1024] = {0};
-	strcpy(buffer, "W00");
-	send_packet_string(buffer);
+	send_packet_string("W00");
 }
 
 //
