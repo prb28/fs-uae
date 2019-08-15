@@ -41,6 +41,8 @@
 //-----------------
 // The tracepoint implementation is incorrect
 //  the QTFrame is used to select a frame, that modifies the behaviour of g command to get the registers
+//  A phantom register (of index REGISTER_COPPER_ADDR_INDEX) is added to get the copper current address
+//      this register can be retrieved with the get_register request
 //-----------------
 // Test with gdb (needs a gdb compiled for amiga arch)
 // Example of launch command for fs-uae
@@ -948,6 +950,10 @@ bool handle_get_register (char* packet, int packet_length)
 		{
 			buffer = write_u32 (buffer, m68k_getpc());
 		}
+		else if (register_number == REGISTER_COPPER_ADDR_INDEX)
+		{
+			buffer = write_u32 (buffer, get_copper_address(-1));
+		}
 		else if (register_number == REGISTER_SR_INDEX)
 		{
 			buffer = write_u32 (buffer, regs.sr);
@@ -956,13 +962,11 @@ bool handle_get_register (char* packet, int packet_length)
 		{
 			buffer = write_u32 (buffer, m68k_dreg (regs, register_number - REGISTER_D0_INDEX));
 		}
-		else 	if ((register_number <= REGISTER_A0_INDEX+7) && (register_number >= REGISTER_A0_INDEX))
+		else if ((register_number <= REGISTER_A0_INDEX+7) && (register_number >= REGISTER_A0_INDEX))
 		{
 			buffer = write_u32 (buffer, m68k_areg (regs, register_number - REGISTER_A0_INDEX));
 		} else {
 			fs_log("[REMOTE_DEBUGGER] The register number '%d' is invalid\n", register_number);
-			//send_packet_string ("");
-			//return false;
 			buffer = write_string (buffer, "xxxxxxxx");
 		}
 	}
@@ -976,6 +980,10 @@ bool handle_get_register (char* packet, int packet_length)
 			if (register_number == REGISTER_PC_INDEX)
 			{
 				buffer = write_u32 (buffer, tframe->current_pc);
+			}
+			else if (register_number == REGISTER_COPPER_ADDR_INDEX)
+			{
+				buffer = write_u32 (buffer, get_copper_address(-1));
 			}
 			else if (register_number == REGISTER_SR_INDEX)
 			{
@@ -991,8 +999,6 @@ bool handle_get_register (char* packet, int packet_length)
 			} else {
 				fs_log("[REMOTE_DEBUGGER] The register number '%d' is invalid\n", register_number);
 				buffer = write_string (buffer, "xxxxxxxx");
-//				send_packet_string ("");
-//				return sen;
 			}
 		}
 		else
@@ -1229,13 +1235,7 @@ static uae_u8* write_exception (unsigned char *message_buffer, int process_id, i
 		// 	buffer = write_u32 (buffer, 0);
 		// 	buffer = write_char(buffer, ';');
 		// }
-		
-		// Other infos
-		//buffer = write_u8(buffer, REGISTER_COPPER_ADDR_INDEX);
-		//buffer = write_char(buffer, ':');
-		//buffer = write_u32 (buffer, get_copper_address(-1));
 	}
-	//buffer = write_char(buffer, ';');
 	return buffer;
 }
 
