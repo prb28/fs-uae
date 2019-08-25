@@ -1972,7 +1972,7 @@ static bool handle_set_breakpoint_address (char* packet, bool add)
 	uaecptr offset;
 	uae_u32 kind = BREAKPOINT_KIND_ABSOLUTE_ADDR;
 
-	if (s_breakpoint_count + 1 >= MAX_BREAKPOINT_COUNT)
+	if ((s_breakpoint_count + 1) >= MAX_BREAKPOINT_COUNT)
 	{
 		fs_log("[REMOTE_DEBUGGER] Max number of breakpoints (%d) has been reached. Removed some to add new ones", MAX_BREAKPOINT_COUNT);
 		send_packet_string (ERROR_MAX_BREAKPOINTS_REACHED);
@@ -2733,7 +2733,7 @@ void remote_debug_start_executable (struct TrapContext *context)
 	bool use_create_proc = kickstart_version && kickstart_version < 36;
 #ifdef FSUAE
 	uaecptr filename = ds (s_exe_to_run);
-	uaecptr args = ds ("");
+	uaecptr args = ds ("\n");
 	uaecptr procname = ds ("debug");
 #else
 	uaecptr filename = ds (_T(s_exe_to_run));
@@ -2824,7 +2824,7 @@ void remote_debug_start_executable (struct TrapContext *context)
 		context_set_dreg(context, 1, segs);
 		context_set_dreg(context, 2, 4096);
 		context_set_dreg(context, 3, args);
-		context_set_dreg(context, 4, 0);
+		context_set_dreg(context, 4, 1);
 	}
 
 	update_debug_illegal();
