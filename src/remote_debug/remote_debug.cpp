@@ -125,6 +125,7 @@ extern int debug_copper;
 
 #define BREAKPOINT_KIND_SEG_ID_MAX		99  // Maximum segment Id accepted in Breakpoint kind
 #define BREAKPOINT_KIND_ABSOLUTE_ADDR	100 // Breakpoint Kind = Absolute address (no segment defined)
+#define BREAKPOINT_KIND_OFFSET	        0   // Breakpoint Kind = Offset / segment ID address
 #define BREAKPOINT_KIND_MAX				100 // Maximum value for breakpoint kind
 
 #define PACKET_SIZE		10240 // Communication packet max size
@@ -338,6 +339,96 @@ static uaecptr s_skip_to_pc = 0xffffffff;
 static Breakpoint s_breakpoints[MAX_BREAKPOINT_COUNT];
 static int s_breakpoint_count = 0;
 
+
+/**
+ * Searches for a breakpoint
+ * 
+ * @param address Address
+ * @param offset Offset
+ * @param kind Kind
+ * @param seg_id Segment id
+ * @return Index of the breakpoint or -1 if not found
+ */
+static int find_breakpoint(uaecptr address, uaecptr offset, uae_u32 kind, uaecptr seg_id)
+{
+	for (int i = 0; i < s_breakpoint_count; i++) {
+		if (((kind == BREAKPOINT_KIND_ABSOLUTE_ADDR) && (s_breakpoints[i].address == address)) ||
+			((kind == BREAKPOINT_KIND_OFFSET) && ((s_breakpoints[i].offset == offset) && (s_breakpoints[i].seg_id == seg_id)))) {
+				return i;
+		}
+	}
+	return -1;
+}
+
+/**
+ * Adds a breakpoint
+ * 
+ * @param address Address
+ * @param offset Offset
+ * @param kind Kind
+ * @param needs_resolve Needs resolution
+ * @param seg_id Segment id
+ * @return Index of the new breakpoint or -1
+ */
+static int add_breakpoint(uaecptr address, uaecptr offset, uae_u32 kind, bool needs_resolve, uaecptr seg_id) {
+	// search for the breakpoint
+	int bp_id = find_breakpoint(address, offset, kind, seg_id);
+	if (bp_id >= 0) {
+		return bp_id;
+	} else if (s_breakpoint_count < MAX_BREAKPOINT_COUNT) {
+		// New breakpoint
+		s_breakpoints[s_breakpoint_count].address = address;
+		s_breakpoints[s_breakpoint_count].offset = offset;
+		s_breakpoints[s_breakpoint_count].kind = kind;
+		s_breakpoints[s_breakpoint_count].needs_resolve = needs_resolve;
+		s_breakpoints[s_breakpoint_count].seg_id = seg_id;
+		s_breakpoint_count++;
+		return s_breakpoint_count;
+	}
+	fs_log("[REMOTE_DEBUGGER] Max number of breakpoints (%d) has been reached. Removed some to add new ones", MAX_BREAKPOINT_COUNT);
+	return -1;
+}
+
+/**
+ * Cleans a breakpoint to default values
+ * 
+ * @param index Index of the breakpoint
+ */
+static void reset_breakpoint(int index) {
+	if ((index > 0) && (index < MAX_BREAKPOINT_COUNT)) {
+		fs_log("[REMOTE_DEBUGGER] Reset breakpoint position %d", index);
+		s_breakpoints[index].address = 0;
+		s_breakpoints[index].offset = 0;
+		s_breakpoints[index].kind = BREAKPOINT_KIND_ABSOLUTE_ADDR;
+		s_breakpoints[index].needs_resolve = true;
+		s_breakpoints[index].seg_id = 0;
+	}
+}
+
+
+/**
+ * Removes a breakpoint
+ * @param index Index of the breakpoint to remove
+ * @return True if it had been removed
+ */
+static bool remove_breakpoint(int index) 
+{
+	if ((index > 0) && (index < MAX_BREAKPOINT_COUNT)) {
+		int lastPosition = s_breakpoint_count - 1;
+		if (index != lastPosition) {
+			// Copy of the last breakpoint to this index
+			s_breakpoints[index].address = s_breakpoints[lastPosition].address;
+			s_breakpoints[index].offset = s_breakpoints[lastPosition].offset;
+			s_breakpoints[index].kind = s_breakpoints[lastPosition].kind;
+			s_breakpoints[index].needs_resolve = s_breakpoints[lastPosition].needs_resolve;
+			s_breakpoints[index].seg_id = s_breakpoints[lastPosition].seg_id;
+		}
+		reset_breakpoint(lastPosition);
+		s_breakpoint_count--;
+		return true;
+	}
+	return false;
+}
 
 /**
  * Parses an int from a hex char
@@ -1916,10 +2007,9 @@ static void resolve_breakpoint_seg_offset (Breakpoint* breakpoint)
  */
 static void set_offset_seg_breakpoint (uaecptr offset, uae_u32 kind)
 {
-	s_breakpoints[s_breakpoint_count].offset = offset;
-	s_breakpoints[s_breakpoint_count].kind = kind;
-    resolve_breakpoint_seg_offset (&s_breakpoints[s_breakpoint_count]);
-	s_breakpoint_count++;
+	if(add_breakpoint(0, offset, kind, true, 0)) {
+		resolve_breakpoint_seg_offset (&s_breakpoints[s_breakpoint_count - 1]);
+	}
 }
 
 /**
@@ -1932,30 +2022,35 @@ static bool set_absolute_address_breakpoint (uaecptr address)
 	if (log_remote_protocol_enabled) {
 		fs_log("[REMOTE_DEBUGGER] Added absolute address breakpoint at 0x%08x \n", address);
 	}
-	s_breakpoints[s_breakpoint_count].address = address;
-	s_breakpoints[s_breakpoint_count].kind = BREAKPOINT_KIND_ABSOLUTE_ADDR;
-	s_breakpoints[s_breakpoint_count].needs_resolve = false;
-	s_breakpoint_count++;
-	return reply_ok ();
+	if(add_breakpoint(address, 0, BREAKPOINT_KIND_ABSOLUTE_ADDR, false, 0)) {
+		return reply_ok ();
+	} else {
+		send_packet_string (ERROR_MAX_BREAKPOINTS_REACHED);
+		return false;
+	}
 }
+
 
 /**
  * Removes a breakpoint
  * 
- * @param offset offset or address
- * @param kind Kid of breakpoint
+ * @param offset_or_address offset or address
+ * @param seg_id seg id or kind of breakpoint 
  * @return true if it was removed
  */
-static bool remove_breakpoint (uaecptr offset, uae_u32 kind) 
+static bool remove_breakpoint_and_reply (uaecptr offset_or_address, uae_u32 seg_id) 
 {
-	for (int i = 0; i < s_breakpoint_count; ++i) {
-		if ((s_breakpoints[i].address == offset) ||
-			(s_breakpoints[i].offset == offset && s_breakpoints[i].seg_id == kind)) {
-			s_breakpoints[i] = s_breakpoints[s_breakpoint_count - 1];
-			s_breakpoint_count--;
+	fs_log("[REMOTE_DEBUGGER] removing breakpoint count = %d\n", s_breakpoint_count);
+	for (int i = 0; i < s_breakpoint_count; i++) {
+		fs_log("[REMOTE_DEBUGGER] test Breakpoint = %d\n", i);
+		if ((s_breakpoints[i].address == offset_or_address) ||
+			(s_breakpoints[i].offset == offset_or_address && s_breakpoints[i].seg_id == seg_id)) {
+			remove_breakpoint(i);
+			fs_log("[REMOTE_DEBUGGER] found Breakpoint = %d\n", i);
 			return reply_ok ();
 		}
 	}
+	fs_log("[REMOTE_DEBUGGER] Breakpoint not found count = %d\n", s_breakpoint_count);
 	return reply_ok ();
 }
 
@@ -1970,7 +2065,7 @@ static bool remove_breakpoint (uaecptr offset, uae_u32 kind)
 static bool handle_set_breakpoint_address (char* packet, bool add)
 {
 	uaecptr offset;
-	uae_u32 kind = BREAKPOINT_KIND_ABSOLUTE_ADDR;
+	uae_u32 kind_or_segid = BREAKPOINT_KIND_ABSOLUTE_ADDR;
 
 	if ((s_breakpoint_count + 1) >= MAX_BREAKPOINT_COUNT)
 	{
@@ -1980,7 +2075,7 @@ static bool handle_set_breakpoint_address (char* packet, bool add)
 	}
 
 	if (log_remote_protocol_enabled) {
-		fs_log("[REMOTE_DEBUGGER] parsing breakpoint\n");
+		fs_log("[REMOTE_DEBUGGER] parsing breakpoint %s\n", packet);
 	}
 	
 	// if we have two args it means that the data is of type offset,kind and we need to resolve that.
@@ -1988,7 +2083,7 @@ static bool handle_set_breakpoint_address (char* packet, bool add)
 	// and resolve it after we loaded the executable
 	// THe kind can be a segment id or an absolute or copper address
 
-	int scan_res = sscanf (packet, "%x,%x", &offset, &kind);
+	int scan_res = sscanf (packet, "%x,%x", &offset, &kind_or_segid);
 
 	if (scan_res < 1)
 	{
@@ -1997,13 +2092,13 @@ static bool handle_set_breakpoint_address (char* packet, bool add)
 		return false;
 	}
 	if (!add) {
-		remove_breakpoint(offset, kind);
-	} else if (kind > BREAKPOINT_KIND_MAX) {
-		fs_log("[REMOTE_DEBUGGER] Breakpoint kind invalid: %d\n", kind);
+		return remove_breakpoint_and_reply(offset, kind_or_segid);
+	} else if (kind_or_segid > BREAKPOINT_KIND_MAX) {
+		fs_log("[REMOTE_DEBUGGER] Breakpoint kind invalid: %d\n", kind_or_segid);
 		send_packet_string (ERROR_UNKNOWN_BREAKPOINT_KIND);
 		return false;
-	} else if (kind <= BREAKPOINT_KIND_SEG_ID_MAX) {
-		set_offset_seg_breakpoint (offset, kind);
+	} else if (kind_or_segid <= BREAKPOINT_KIND_SEG_ID_MAX) {
+		set_offset_seg_breakpoint (offset, kind_or_segid);
 		return reply_ok ();
     } else {
 		return set_absolute_address_breakpoint (offset);
