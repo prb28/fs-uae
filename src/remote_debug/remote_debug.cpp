@@ -1703,11 +1703,20 @@ static bool handle_qoffsets_packet() {
 		uae_u8 message_buffer[1024] = { 0 };
 		uae_u8 *buffer = message_buffer;
 		uae_u8 *t = message_buffer;
-		buffer = write_string(buffer, "$TextSeg=");
-		buffer = write_u32(buffer, s_segment_info[0].address);
-		if (s_segment_count > 1) {
-			buffer = write_string(buffer, ";DataSeg=");
-			buffer = write_u32(buffer, s_segment_info[1].address);
+		// Non standard feature add all the offsets after
+		for (int i = 0; i< s_segment_count; i++) {
+			if (i == 0) {
+				buffer = write_string(buffer, "$TextSeg=");
+				buffer = write_u32(buffer, s_segment_info[0].address);
+			} else if (i ==1) {
+				buffer = write_string(buffer, ";DataSeg=");
+				buffer = write_u32(buffer, s_segment_info[1].address);
+			} else {
+				buffer = write_string(buffer, ";CustomSeg");
+				buffer = write_u8(buffer, i);
+				buffer = write_string(buffer, "=");
+				buffer = write_u32(buffer, s_segment_info[i].address);
+			}
 		}
 		return send_packet_in_place(t, (int)((uintptr_t)buffer - (uintptr_t)t) - 1);
 	} else {
