@@ -333,8 +333,10 @@ struct Breakpoint {
     bool needs_resolve;		// Has it been resolved : seg_id / offset only can be resolved when the program is loaded
 };
 
-// used when skipping an instruction
-static uaecptr s_skip_to_pc = 0xffffffff;
+// used when skipping instructions - stepping until pc in range
+// s_skip_to_pc_start: inclusive  / s_skip_to_pc_end: exclusive
+static uaecptr s_skip_to_pc_start = 0xffffffff;
+static uaecptr s_skip_to_pc_end = 0xffffffff;
 
 static Breakpoint s_breakpoints[MAX_BREAKPOINT_COUNT];
 static int s_breakpoint_count = 0;
@@ -1415,26 +1417,49 @@ static bool step(int process_id, int thread_id)
  * 
  * @param process_id Process id
  * @param thread_id Thread id
+ * @param start_addres Start of the address range to stop inclusive
+ * @param end_addres End of the address range to stop exclusive
  * @return true if there is no error
  */
-static bool step_next_instruction (int process_id, int thread_id) {
+static bool step_until_range_instruction (int process_id, int thread_id,  uaecptr start_address, uaecptr end_address) {
 	current_traceframe = DEFAULT_TRACEFRAME;
 	if (thread_id == THREAD_ID_CPU) {
-		uaecptr nextpc = 0;
-		uaecptr pc = m68k_getpc ();
-		m68k_disasm (pc, &nextpc, 0xffffffff, 1);
-
+		if (start_address == end_address) {
+			uaecptr nextpc = 0;
+			uaecptr pc = m68k_getpc ();
+			// Get the opcode
+			uae_u32 opcode = get_word_debug (pc);
+			// Check if it is a return opcode
+			if (opcode == 0x4e73 			/* RTE */
+				|| opcode == 0x4e74 		/* RTD */
+				|| opcode == 0x4e75 		/* RTS */
+				|| opcode == 0x4e77 		/* RTR */
+				|| opcode == 0x4e76 		/* TRAPV */
+				//|| (opcode & 0xffc0) == 0x4e80 	/* JSR */
+				|| (opcode & 0xffc0) == 0x4ec0 	/* JMP */
+				//|| (opcode & 0xff00) == 0x6100	/* BSR */
+				|| ((opcode & 0xf000) == 0x6000	/* Bcc */
+				&& cctrue ((opcode >> 8) & 0xf))
+				|| ((opcode & 0xf0f0) == 0x5050	/* DBcc */
+				&& !cctrue ((opcode >> 8) & 0xf)
+				&& (uae_s16)m68k_dreg (regs, opcode & 7) != 0)){
+					// A step to next instruction is neeeded in these case
+					return step(process_id, thread_id);
+			}
+			// step one instruction after this pc
+			m68k_disasm (pc, &nextpc, 0xffffffff, 1);
+			start_address = nextpc;
+			end_address = nextpc + 10;
+		}
 		remote_activate_debugger ();
-
 		step_cpu = true;
 		did_step_cpu = true;
-		//exception_debugging = 0;
-
 		if (log_remote_protocol_enabled) {
-			fs_log("[REMOTE_DEBUGGER] current pc 0x%08x - next pc 0x%08x\n", pc, nextpc);
+			uaecptr pc = m68k_getpc ();
+			fs_log("[REMOTE_DEBUGGER] pc 0x%08x stepping to range start pc 0x%08x - end pc 0x%08x\n", pc, start_address, end_address);
 		}
-
-		s_skip_to_pc = nextpc;
+		s_skip_to_pc_start = start_address;
+		s_skip_to_pc_end = end_address;
 		s_state = Running;
 	} else if (thread_id == THREAD_ID_COP) {
 		// copper step
@@ -1443,6 +1468,17 @@ static bool step_next_instruction (int process_id, int thread_id) {
 		remote_deactivate_debugger();
 	}
 	return true;
+}
+
+/**
+ * Step to the next instruction command
+ * 
+ * @param process_id Process id
+ * @param thread_id Thread id
+ * @return true if there is no error
+ */
+static bool step_next_instruction (int process_id, int thread_id) {
+	return step_until_range_instruction(process_id, thread_id, 0, 0);
 }
 
 /**
@@ -2331,8 +2367,7 @@ static bool handle_vcont (char* packet)
 			break;
 			case 'r':
 			// step range
-			// TODO: use start_address and end_address
-			return step_next_instruction(process_id, thread_id);
+			return step_until_range_instruction(process_id, thread_id, start_address, end_address);
 			break;
 			default:
 			// not implemented
@@ -2637,16 +2672,15 @@ static void remote_debug_ (void)
 	}
 	else
 	{
-		// used when stepping over an instruction (useful to skip bsr/jsr/etc)
-
-		if (s_skip_to_pc != 0xffffffff)
+		// used when stepping over an instruction
+		if (s_skip_to_pc_start != 0xffffffff)
 		{
 			set_special (SPCFLAG_BRK);
-
-			if (s_skip_to_pc == pc) {
+			if ((s_skip_to_pc_start <= pc) && (s_skip_to_pc_end > pc)) {
 				send_exception (PROCESS_ID_SYSTEM, THREAD_ID_CPU, true, false, false);
 				s_state = Tracing;
-				s_skip_to_pc = 0xffffffff;
+				s_skip_to_pc_start = 0xffffffff;
+				s_skip_to_pc_end = 0xffffffff;
 				step_exception_sent = true;
 			}
 		}
