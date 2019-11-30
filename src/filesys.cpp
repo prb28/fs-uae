@@ -1837,13 +1837,13 @@ static uae_u32 REGPARAM2 debugger_helper(TrapContext *context)
 bool debugger_boot(void)
 {
 	Unit *u;
-	printf("starting debugger boot units: %p\n", units);
+	write_log(_T("starting debugger boot units: %p\n"), units);
 	if (units) {
 		for (u = units; u; u = u->next) {
 			if (is_virtual(u->unit) && filesys_isvolume(u)) {
-				printf("looping devs %p\n", u);
+				write_log(_T("looping devs %p\n"), u);
 				put_byte(u->volume + 173 - 32, get_byte(u->volume + 173 - 32) | 2);
-				printf("signal!\n");
+				write_log(_T("signal!\n"));
 				uae_Signal(get_long(u->volume + 176 - 32), 1 << 13);
 				break;
 			}
