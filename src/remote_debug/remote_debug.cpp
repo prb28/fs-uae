@@ -8,7 +8,7 @@
 // (c) 2019-2018 Paul Raingeard (Extension of GDB Implementation/remote debugger interface)
 //
 // This implementation is done from scratch and doesn't use any existing gdb-stub code.
-// The idea is to supply a fairly minimal implementation in order to reduce maintaince.
+// The idea is to supply a fairly minimal implementation in order to reduce maintainance.
 //
 // This is what according to the GDB protocol dock over here https://sourceware.org/gdb/current/onlinedocs/gdb/Overview.html
 // is required of a stub:
@@ -70,6 +70,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <libgen.h>
 
 #include "fs/conf.h"
 #include "fs/log.h"
@@ -166,7 +167,7 @@ enum DebuggerState
 {
     Running,
     Tracing,
-    // Used to step the CPU until we endup in the program we are debugging
+    // Used to step the CPU until we end up in the program we are debugging
     TraceToProgram,
 };
 
@@ -228,7 +229,7 @@ static inline int startswith (const char *string, const char *pattern)
 }
 
 // Test if it is a hex value
-static bool ishex(int ch, int *val)
+static bool is_hex(int ch, int *val)
 {
 	if ((ch >= 'a') && (ch <= 'f'))
 	{
@@ -255,7 +256,7 @@ const char *unpack_varlen_hex(const char *buff, uae_u32 *result)
 	int nibble;
 	uae_u32 retval = 0;
 
-	while (ishex(*buff, &nibble))
+	while (is_hex(*buff, &nibble))
 	{
 		buff++;
 		retval = retval << 4;
@@ -1355,7 +1356,7 @@ static bool send_exception (int process_id, int thread_id, bool detailed, bool s
 		return true;
 	}
 	// this function will just exit if already connected
-	rconn_update_listner(s_conn);
+	rconn_update_listener(s_conn);
 
 	unsigned char message_buffer[512] = { 0 };
 	uae_u8 *t = message_buffer;
@@ -1443,7 +1444,7 @@ static bool step_until_range_instruction (int process_id, int thread_id,  uaecpt
 				|| ((opcode & 0xf0f0) == 0x5050	/* DBcc */
 				&& !cctrue ((opcode >> 8) & 0xf)
 				&& (uae_s16)m68k_dreg (regs, opcode & 7) != 0)){
-					// A step to next instruction is neeeded in these case
+					// A step to next instruction is needed in these case
 					return step(process_id, thread_id);
 			}
 			// step one instruction after this pc
@@ -1782,7 +1783,7 @@ static bool handle_qtstatus_packet() {
  * Partial implementation : Not real tracepoint implentation
  *‘qTfV’
  *‘qTsV’
- *   These packets request data about trace state variables that are on the target. GDB sends qTfV to get the first vari of data, and multiple qTsV to get additional variables. Replies to these packets follow the syntax of the QTDV packets that define trace state variables.
+ *   These packets request data about trace state variables that are on the target. GDB sends qTfV to get the first var of data, and multiple qTsV to get additional variables. Replies to these packets follow the syntax of the QTDV packets that define trace state variables.
  * @return true if the response was sent without error
  */
 static bool handle_qtfv() {
@@ -1939,7 +1940,7 @@ static bool handle_vstopped ()
  */
 static bool handle_qmark ()
 {
-	// Abandonning vStopped reports
+	// Abandoning vStopped reports
 	current_vstopped_idx = 0;
 	// Send first exception
 	return handle_vstopped ();
@@ -1990,7 +1991,7 @@ static bool handle_continue_exec (int process_id, int thread_id, char* packet)
 		uae_u32 address;
 		if (sscanf (packet, "%x#", &address) != 1)
 		{
-			fs_log("[REMOTE_DEBUGGER] Unable to parse continnue packet %s\n", packet);
+			fs_log("[REMOTE_DEBUGGER] Unable to parse continue packet %s\n", packet);
 			return false;
 		}
 		m68k_setpci(address);
@@ -2019,7 +2020,7 @@ static int has_breakpoint_address(uaecptr address)
 
 /**
  * Resolves the address of a breakpoint.
- * Transforms from seg/offset to absolute momory address
+ * Transforms from seg/offset to absolute memory address
  * 
  * @param breakpoint Breakpoint to process
  */
@@ -2292,10 +2293,10 @@ static bool pause_exec(int process_id, int thread_id) {
  *   The optional argument addr normally associated with the ‘c’, ‘C’, ‘s’, and ‘S’ packets is not supported in ‘vCont’.
  *   The ‘t’ action is only relevant in non-stop mode (see Remote Non-Stop) and may be ignored by the stub otherwise. A stop reply should be generated for any affected thread not already stopped. When a thread is stopped by means of a ‘t’ action, the corresponding stop reply should indicate that the thread has stopped with signal ‘0’, regardless of whether the target uses some other signal as an implementation detail.
  *   The server must ignore ‘c’, ‘C’, ‘s’, ‘S’, and ‘r’ actions for threads that are already running. Conversely, the server must ignore ‘t’ actions for threads that are already stopped.
- *   Note: In non-stop mode, a thread is considered running until GDB acknowleges an asynchronous stop notification for it with the ‘vStopped’ packet (see Remote Non-Stop).
+ *   Note: In non-stop mode, a thread is considered running until GDB acknowledges an asynchronous stop notification for it with the ‘vStopped’ packet (see Remote Non-Stop).
  *   The stub must support ‘vCont’ if it reports support for multiprocess extensions (see multiprocess extensions).
  *   Reply: See Stop Reply Packets, for the reply specifications.
- * @param packet Recieved packet
+ * @param packet Received packet
  * @return true if the response was sent without error
  */
 static bool handle_vcont (char* packet)
@@ -2623,7 +2624,7 @@ static void update_connection (void)
 	//fs_log("[REMOTE_DEBUGGER] updating connection\n");
 
 	// this function will just exit if already connected
-	rconn_update_listner (s_conn);
+	rconn_update_listener (s_conn);
 
 	if (rconn_poll_read(s_conn)) {
 		char temp[1024] = { 0 };
@@ -2832,7 +2833,7 @@ static void remote_debug_update_ (void)
 	if (!s_conn)
 		return;
 
-	rconn_update_listner (s_conn);
+	rconn_update_listener (s_conn);
 
 	remote_debug_ ();
     remote_activate_debugger ();
@@ -2850,18 +2851,39 @@ static void remote_debug_update_ (void)
 extern uaecptr get_base (const uae_char *name, int offset);
 
 /**
+ * Look for the filename position in a Amiga path.
+ * @param filepath Filename path terminated by \0
+ * @return Position of the filename
+ */
+size_t find_filename_pos(const char *filepath) {
+	size_t length = strlen(filepath);
+	size_t last_pos = 0;
+	for (size_t i = 0; i < length; i++) {
+		char c = filepath[i];
+		if (c == ':' || c == '/') {
+			if (i < (length-1)) {
+				last_pos = i+1;
+			} else {
+				last_pos = i;
+			}
+		}
+	}
+	return last_pos;
+}
+
+/**
  * Called from debugger_helper. At this point CreateProcess has been called
  * and we are resposible for filling out the data needed by the "RunCommand"
  * that looks like this:
  *
  *    rc = RunCommand(seglist, stacksize, argptr, argsize)
- *    D0		D1	   D2	    D3	    D4
+ *    D0			     D1		  D2		D3		D4
  *
  *    LONG RunCommand(BPTR, ULONG, STRPTR, ULONG)
  *
  * For Kickstart under 2.0 - we use CreateProc
  *    process = CreateProc( name, pri, seglist, stackSize )
- *    D0                    D1    D2   D3       D4
+ *    D0                     D1   D2     D3        D4
  *
  *   struct MsgPort *CreateProc(STRPTR, LONG, BPTR, LONG)
  * @param context Context of trap execution
@@ -2869,12 +2891,29 @@ extern uaecptr get_base (const uae_char *name, int offset);
 void remote_debug_start_executable (struct TrapContext *context)
 {
 	bool use_create_proc = kickstart_version && kickstart_version < 36;
+	size_t length = strlen(s_exe_to_run);
+	size_t filenamePos = find_filename_pos(s_exe_to_run);
+	size_t filenameSize = length-filenamePos;
+	char *s_exe_to_run_dir_name = xmalloc(char, length+1);
+	if (filenamePos > 0) {
+    	memcpy (s_exe_to_run_dir_name, s_exe_to_run, filenamePos);
+	} else {
+		s_exe_to_run_dir_name[0] = '.';
+	}
+	s_exe_to_run_dir_name[filenamePos+1] = '\0';
+	char *s_exe_to_run_base_name = xmalloc(char, length+1);
+    memcpy (s_exe_to_run_base_name, &s_exe_to_run[filenamePos], filenameSize);
+	s_exe_to_run_base_name[filenameSize+1] = '\0';
 #ifdef FSUAE
-	uaecptr filename = ds (s_exe_to_run);
+	uaecptr dirname = ds (s_exe_to_run_dir_name);
+	uaecptr filename = ds (s_exe_to_run_base_name);
+	uaecptr full_filename = ds (s_exe_to_run);
 	uaecptr args = ds ("\n");
 	uaecptr procname = ds ("debug");
 #else
-	uaecptr filename = ds (_T(s_exe_to_run));
+	uaecptr dirname = ds (_T(s_exe_to_run_dir_name));
+	uaecptr filename = ds (_T(s_exe_to_run_base_name));
+	uaecptr full_filename = ds (_T(s_exe_to_run));
 	uaecptr args = ds (_T(""));
 	uaecptr procname = ds (_T("debug"));
 #endif
@@ -2901,7 +2940,7 @@ void remote_debug_start_executable (struct TrapContext *context)
 		return;
 	}
 
-    m68k_dreg (regs, 1) = filename;
+    m68k_dreg (regs, 1) = full_filename;
 	CallLib (context, dosbase, -150);
 
 	// Get the segments for the executables (sent to debugger to match up the debug info)
@@ -2951,6 +2990,31 @@ void remote_debug_start_executable (struct TrapContext *context)
 
 		resolve_breakpoint_seg_offset (bp);
 	}
+
+	// Function offsets from : http://amigadev.elowar.com/read/ADCD_2.1/Includes_and_Autodocs_2._guide/node0550.html
+
+	//     Lock -- Lock a directory or file
+	//     lock  = Lock( name, accessMode )
+	//     D0            D1        D2
+	m68k_dreg (regs, 1) = dirname;
+	// SHARED_LOCK / ACCESS_READ	-2  /* No other access allowed  */
+	// EXCLUSIVE_LOCK / ACCESS_WRITE	-1  /* No other access allowed  */
+	m68k_dreg (regs, 2) = -2;
+	CallLib (context, dosbase, -84);
+	uaecptr d0_lock = m68k_dreg (regs, 0);
+	if (d0_lock != 0) {
+	 	fs_log("[REMOTE_DEBUGGER] Lock on '%s' failed\n", dirname);
+	}
+
+    // CurrentDir -- Make a directory lock the current directory
+    // oldLock = CurrentDir( lock )
+    // D0                    D1
+	m68k_dreg (regs, 1) = d0_lock;
+	CallLib (context, dosbase, -126);
+
+	// Free the path variables
+	xfree(s_exe_to_run_dir_name);
+	xfree(s_exe_to_run_base_name);
 
 	context_set_areg(context, 6, dosbase);
 	if (use_create_proc) {
