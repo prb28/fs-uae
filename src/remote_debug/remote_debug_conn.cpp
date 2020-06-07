@@ -80,7 +80,7 @@ static int socket_poll (int socket)
     return select (socket + 1, &fds, NULL, NULL, &to) > 0;
 }
 
-static int create_listner (rconn* conn, int port)
+static int create_listener (rconn* conn, int port)
 {
     struct sockaddr_in sin;
     int yes = 1;
@@ -131,7 +131,7 @@ struct rconn* rconn_create (enum ConnectionType type, int port)
     conn->socket = INVALID_SOCKET;
 
     if (type == ConnectionType_Listener) {
-        if (!create_listner(conn, port)) {
+        if (!create_listener(conn, port)) {
             xfree(conn);
             return 0;
         }
@@ -192,7 +192,7 @@ int rconn_is_connected (rconn* conn)
     return conn->socket != INVALID_SOCKET;
 }
 
-void rconn_update_listner (rconn* conn)
+void rconn_update_listener (rconn* conn)
 {
     struct timeval timeout;
     struct sockaddr_in client;

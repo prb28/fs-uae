@@ -12,7 +12,7 @@ enum ConnectionType
 struct rconn* rconn_create (enum ConnectionType type, int port);
 void rconn_destroy (struct rconn* conn);
 
-void rconn_update_listner (struct rconn* conn);
+void rconn_update_listener (struct rconn* conn);
 int rconn_is_connected (struct rconn* conn);
 
 int rconn_send(struct rconn* conn, const void* buffer, int length, int flags);
