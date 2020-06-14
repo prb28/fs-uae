@@ -2900,10 +2900,10 @@ void remote_debug_start_executable (struct TrapContext *context)
 	} else {
 		s_exe_to_run_dir_name[0] = '.';
 	}
-	s_exe_to_run_dir_name[filenamePos+1] = '\0';
+	s_exe_to_run_dir_name[filenamePos] = '\0';
 	char *s_exe_to_run_base_name = xmalloc(char, length+1);
     memcpy (s_exe_to_run_base_name, &s_exe_to_run[filenamePos], filenameSize);
-	s_exe_to_run_base_name[filenameSize+1] = '\0';
+	s_exe_to_run_base_name[filenameSize] = '\0';
 #ifdef FSUAE
 	uaecptr dirname = ds (s_exe_to_run_dir_name);
 	uaecptr filename = ds (s_exe_to_run_base_name);
