@@ -3002,16 +3002,15 @@ void remote_debug_start_executable (struct TrapContext *context)
 	m68k_dreg (regs, 2) = -2;
 	CallLib (context, dosbase, -84);
 	uaecptr d0_lock = m68k_dreg (regs, 0);
-	if (d0_lock != 0) {
-	 	fs_log("[REMOTE_DEBUGGER] Lock on '%s' failed\n", dirname);
+	if (d0_lock == 0) {
+	 	fs_log("[REMOTE_DEBUGGER] Lock on '%s' failed\n", s_exe_to_run_dir_name);
+	} else {
+		// CurrentDir -- Make a directory lock the current directory
+		// oldLock = CurrentDir( lock )
+		// D0                    D1
+		m68k_dreg (regs, 1) = d0_lock;
+		CallLib (context, dosbase, -126);
 	}
-
-    // CurrentDir -- Make a directory lock the current directory
-    // oldLock = CurrentDir( lock )
-    // D0                    D1
-	m68k_dreg (regs, 1) = d0_lock;
-	CallLib (context, dosbase, -126);
-
 	// Free the path variables
 	xfree(s_exe_to_run_dir_name);
 	xfree(s_exe_to_run_base_name);
