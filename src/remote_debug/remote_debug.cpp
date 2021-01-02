@@ -799,8 +799,7 @@ static bool send_registers (void)
 		{
 			for (int i = 0; i < 16; ++i)
 				buffer = write_u32 (buffer, tframe->regs[i]);
-			MakeSR ();
-			buffer = write_u32 (buffer, regs.sr);
+			buffer = write_u32 (buffer, tframe->sr);
 			buffer = write_u32 (buffer, tframe->current_pc);
 		}
 		else
@@ -1082,8 +1081,7 @@ bool handle_get_register (char* packet, int packet_length)
 			}
 			else if (register_number == REGISTER_SR_INDEX)
 			{
-				MakeSR ();
-				buffer = write_u32 (buffer, regs.sr);
+				buffer = write_u32 (buffer, tframe->sr);
 			}
 			else if ((register_number <= REGISTER_D0_INDEX+7) && (register_number >= REGISTER_D0_INDEX))
 			{
