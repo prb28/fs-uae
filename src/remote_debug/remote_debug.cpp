@@ -772,7 +772,7 @@ static bool send_registers (void)
 
 		for (int i = 0; i < 8; ++i)
 			buffer = write_u32 (buffer, m68k_areg (regs, i));
-
+		MakeSR ();
 		buffer = write_u32 (buffer, regs.sr);
 		buffer = write_u32 (buffer, m68k_getpc ());
 
@@ -799,8 +799,8 @@ static bool send_registers (void)
 		{
 			for (int i = 0; i < 16; ++i)
 				buffer = write_u32 (buffer, tframe->regs[i]);
-
-			buffer = write_u32 (buffer, tframe->sr);
+			MakeSR ();
+			buffer = write_u32 (buffer, regs.sr);
 			buffer = write_u32 (buffer, tframe->current_pc);
 		}
 		else
@@ -1050,6 +1050,7 @@ bool handle_get_register (char* packet, int packet_length)
 		}
 		else if (register_number == REGISTER_SR_INDEX)
 		{
+			MakeSR();
 			buffer = write_u32 (buffer, regs.sr);
 		}
 		else if ((register_number <= REGISTER_D0_INDEX+7) && (register_number >= REGISTER_D0_INDEX))
@@ -1081,7 +1082,8 @@ bool handle_get_register (char* packet, int packet_length)
 			}
 			else if (register_number == REGISTER_SR_INDEX)
 			{
-				buffer = write_u32 (buffer, tframe->sr);
+				MakeSR ();
+				buffer = write_u32 (buffer, regs.sr);
 			}
 			else if ((register_number <= REGISTER_D0_INDEX+7) && (register_number >= REGISTER_D0_INDEX))
 			{
@@ -1315,6 +1317,7 @@ static uae_u8* write_exception (unsigned char *message_buffer, int process_id, i
 
 		buffer = write_u8(buffer, REGISTER_SR_INDEX);
 		buffer = write_char(buffer, ':');
+		MakeSR();
 		buffer = write_u32 (buffer, regs.sr);
 		buffer = write_char(buffer, ';');
 		buffer = write_u8(buffer, REGISTER_PC_INDEX);
